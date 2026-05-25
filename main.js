@@ -105,9 +105,31 @@ let currentTrayState = "disconnected";
 
 function updateTrayState(state /* "connected" | "disconnected" | "paused" | "pairing" */) {
   if (!tray) return;
+  const prevState = currentTrayState;
   currentTrayState = state;
   // Mantener el overlay al tanto del estado de conexión (punto verde/rojo)
   forwardToOverlay("overlay:status", { connected: state === "connected" });
+
+  // AUTO-OPEN del HUD la primera vez que el Pastor se conecta tras emparejar.
+  // El Pastor no debería tener que cazar el ícono del tray para encontrar el
+  // HUD — al pasar a "connected" lo mostramos solo. Persistimos un flag para
+  // no abrirlo en CADA reconexión (sería molesto si lo cerró a propósito).
+  if (state === "connected" && prevState !== "connected") {
+    const hasShownHud = !!store.get("hudFirstShown");
+    if (!hasShownHud) {
+      store.set("hudFirstShown", true);
+      // Pequeño delay para que el tray ya esté renderizado y los displays leídos
+      setTimeout(() => {
+        try {
+          openOverlayWindow();
+          rebuildMenu(currentTrayState);
+        } catch (e) {
+          console.warn("[Bridge] auto-open HUD falló:", e.message);
+        }
+      }, 800);
+    }
+  }
+
   const colors = {
     connected: "#22c55e",
     disconnected: "#ef4444",
@@ -168,6 +190,13 @@ function rebuildMenu(state) {
       label: overlayShown ? "🎧 Ocultar HUD flotante" : "🎧 Mostrar HUD flotante",
       enabled: hasToken,
       click: () => toggleOverlay(),
+    },
+    {
+      // Rescate: si el HUD quedó fuera de pantalla (monitor desconectado,
+      // resolución cambiada), lo trae a la esquina inferior-derecha visible.
+      label: "📍 Resetear posición del HUD",
+      enabled: hasToken,
+      click: () => resetOverlayPosition(),
     },
     { type: "separator" },
     {
@@ -499,12 +528,49 @@ function getOverlayBounds() {
   const compact = !!saved.compact;
   const size = compact ? OVERLAY_COMPACT : OVERLAY_DEFAULT;
   let { x, y } = saved;
+
+  // Default: esquina inferior-derecha del display primario.
+  const wa = screen.getPrimaryDisplay().workArea;
+  const defaultX = wa.x + wa.width - size.width - 24;
+  const defaultY = wa.y + wa.height - size.height - 60;
+
   if (typeof x !== "number" || typeof y !== "number") {
-    const wa = screen.getPrimaryDisplay().workArea;
-    x = wa.x + wa.width - size.width - 24;
-    y = wa.y + wa.height - size.height - 60;
+    x = defaultX;
+    y = defaultY;
+  } else {
+    // Validar que la posición guardada cae dentro de ALGÚN display actual.
+    // Caso típico de "HUD invisible": el Pastor desconectó un monitor y la
+    // posición guardada quedó en coords (-1920, 0) → ventana fuera de pantalla.
+    const displays = screen.getAllDisplays();
+    const visible = displays.some(d => {
+      const a = d.workArea;
+      return x + size.width > a.x + 20 &&
+             x < a.x + a.width - 20 &&
+             y + size.height > a.y + 20 &&
+             y < a.y + a.height - 20;
+    });
+    if (!visible) {
+      console.log("[Bridge] HUD bounds fuera de pantalla — reseteando a esquina");
+      x = defaultX;
+      y = defaultY;
+    }
   }
   return { x, y, ...size, compact };
+}
+
+// Resetear posición del overlay (tray menu). Útil si el Pastor cambió de
+// monitor o el HUD quedó atrapado fuera de pantalla.
+function resetOverlayPosition() {
+  const saved = store.get("overlay") || {};
+  store.set("overlay", { ...saved, x: undefined, y: undefined });
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    const b = getOverlayBounds();
+    overlayWindow.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height });
+    overlayWindow.show();
+    overlayWindow.focus();
+  } else {
+    openOverlayWindow();
+  }
 }
 
 function openOverlayWindow() {

@@ -1,0 +1,37 @@
+CUBI BRIDGE — LICENCIA DE USO
+================================================================
+
+Software propietario de CUBI Records / Ministerio Familiar Teshuva.
+
+Este programa es un observador READ-ONLY del audio del estudio del
+Pastor Jose Cubillos. Conecta el DAW (Cubase) con el Coproductor IA
+en apocalipsisconcafe.com. No escribe, no modifica ni envia datos
+del proyecto al servidor — solo metricas de audio en tiempo real.
+
+LINEA ROJA:
+  - El programa NUNCA escribe al DAW.
+  - El programa NUNCA expone audio crudo fuera de tu PC.
+  - Solo se transmiten metricas agregadas (LUFS, True Peak, espectro
+    en 8 bandas) al servidor para que el Coproductor IA pueda darte
+    diagnostico contextual.
+
+INSTALACION:
+  - Se instala en %LOCALAPPDATA%\Programs\cubi-bridge (sin permisos
+    de administrador).
+  - Crea acceso directo en el Escritorio y en el menu Inicio.
+  - Se inicia automaticamente al encender la PC (configurable).
+  - Aparece como icono en la bandeja del sistema (cerca del reloj).
+
+DESINSTALACION:
+  - Panel de Control → Programas → CUBI Bridge → Desinstalar.
+  - La configuracion de emparejamiento se preserva en %APPDATA%
+    para futuras reinstalaciones.
+
+ACTUALIZACIONES:
+  - El Bridge revisa actualizaciones al arrancar y cada 6 horas.
+  - Cuando hay version nueva, la descarga e instala automaticamente
+    en segundo plano. Te avisa cuando esta lista para reiniciar.
+
+SOPORTE: soporte@apocalipsisconcafe.com
+
+(c) 2026 CUBI Records. Todos los derechos reservados.

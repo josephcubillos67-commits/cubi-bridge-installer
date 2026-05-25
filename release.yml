@@ -1,0 +1,49 @@
+name: Build & Release CUBI Bridge
+
+on:
+  push:
+    tags:
+      - 'bridge-v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build NSIS installer + publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win nsis --publish always
+
+      - name: Upload installer as workflow artifact (safety net)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CUBI-Bridge-Setup-exe
+          path: release/CUBI-Bridge-Setup.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: List release/ contents (debug)
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path release) {
+            Get-ChildItem -Recurse release | Select-Object FullName, Length | Format-Table -AutoSize
+          } else {
+            Write-Host "::warning::carpeta release/ no existe"
+          }
