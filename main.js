@@ -29,12 +29,111 @@ const WebSocket = require("ws");
 const net = require("net");
 const path = require("path");
 const os = require("os");
+const fs = require("fs");
+const { execSync } = require("child_process");
+
+// ════════════════════════════════════════════════════════════════
+// HARDENING v1.6.0 — Self-heal del launcher (Windows)
+// ════════════════════════════════════════════════════════════════
+// Pastor reportó 2 PCs distintos donde el Bridge quedaba colgado:
+//   - Electron en zombie (proceso vivo, ventana muerta)
+//   - %appdata%/cubi-bridge bloqueado
+//   - .exe del escritorio dejaba de abrir
+//   - había que matar manualmente desde Task Manager
+//
+// Esta capa hace que el Bridge se autorecupere SIN tocar nada:
+//   1. PID file con heartbeat → detecta zombies
+//   2. Lock recovery → si el lock lo tiene un proceso muerto, lo libera
+//   3. Store recovery → si el JSON está corrupto, lo respalda y arranca limpio
+//   4. IPC port recovery → si el 49162 está ocupado por zombie, lo mata
+//   5. uncaughtException → relaunch suave
+//   6. repairBridge() → tray menu + IPC para reparar bajo demanda
+// ════════════════════════════════════════════════════════════════
+const PID_FILE = path.join(app.getPath("userData"), "bridge.pid");
+
+function readPidFile() {
+  try {
+    const raw = fs.readFileSync(PID_FILE, "utf8").trim();
+    const [pidStr] = raw.split(":");
+    const pid = parseInt(pidStr, 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch { return null; }
+}
+
+function writePidFile() {
+  try { fs.writeFileSync(PID_FILE, `${process.pid}:${Date.now()}`); } catch {}
+}
+
+function isPidAlive(pid) {
+  if (!pid || pid <= 0 || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0); // signal 0 = solo chequea, no mata
+    return true;
+  } catch (err) {
+    return err.code === "EPERM"; // existe pero sin permiso = vivo
+  }
+}
+
+function killZombieBridges() {
+  if (process.platform !== "win32") return false;
+  try {
+    execSync(
+      `taskkill /F /IM "CUBI Bridge.exe" /T /FI "PID ne ${process.pid}"`,
+      { stdio: "ignore", windowsHide: true, timeout: 5000 }
+    );
+    return true;
+  } catch { return false; }
+}
+
+function killProcessOnPort(port) {
+  if (process.platform !== "win32") return false;
+  try {
+    const out = execSync(
+      `netstat -ano -p TCP`,
+      { encoding: "utf8", windowsHide: true, timeout: 5000 }
+    );
+    const pids = new Set();
+    for (const line of out.split(/\r?\n/)) {
+      if (!line.includes(`:${port} `) && !line.includes(`:${port}\t`)) continue;
+      const m = line.trim().match(/LISTENING\s+(\d+)/i);
+      if (m) {
+        const pid = parseInt(m[1], 10);
+        if (pid !== process.pid && pid > 0) pids.add(pid);
+      }
+    }
+    for (const pid of pids) {
+      try { execSync(`taskkill /F /PID ${pid}`, { stdio: "ignore", windowsHide: true, timeout: 3000 }); } catch {}
+    }
+    return pids.size > 0;
+  } catch { return false; }
+}
+
+// ─── Store con recovery ante JSON corrupto ──────────────────────
+function createStoreSafe() {
+  try {
+    const s = new Store({ name: "cubi-bridge-config" });
+    // Forzar parseo del archivo tocando una key
+    s.get("__health_probe__");
+    return s;
+  } catch (err) {
+    console.warn("[Bridge] Config corrupta — respaldando y arrancando limpio:", err.message);
+    try {
+      const cfgPath = path.join(app.getPath("userData"), "cubi-bridge-config.json");
+      if (fs.existsSync(cfgPath)) {
+        fs.renameSync(cfgPath, cfgPath + `.broken-${Date.now()}`);
+      }
+    } catch (e) {
+      console.warn("[Bridge] No se pudo respaldar config corrupta:", e.message);
+    }
+    return new Store({ name: "cubi-bridge-config" });
+  }
+}
 // Install Kit v3 — auto-updater DESACTIVADO. El .exe se sirve desde
 // Object Storage del servidor (sin GitHub Releases). Si hay version nueva,
 // el Pastor vuelve a apretar "Descargar Bridge" desde /lab.
 // const { autoUpdater } = require("electron-updater"); // <- desactivado v1.4.0
 
-const store = new Store({ name: "cubi-bridge-config" });
+const store = createStoreSafe();
 
 const SERVER_URL = process.env.BRIDGE_SERVER_URL || "https://apocalipsisconcafe.com";
 const WS_URL = SERVER_URL.replace(/^http/, "ws") + "/ws/bridge";
@@ -217,6 +316,15 @@ function rebuildMenu(state) {
         closeOverlayWindow();
         updateTrayState("disconnected");
       },
+    },
+    { type: "separator" },
+    {
+      label: "🛠 Reparar Bridge (mantener vinculación)",
+      click: () => { repairBridge({ wipeToken: false }).catch((e) => console.warn(e)); },
+    },
+    {
+      label: "🆘 Reparar todo y desvincular",
+      click: () => { repairBridge({ wipeToken: true }).catch((e) => console.warn(e)); },
     },
     { type: "separator" },
     {
@@ -832,9 +940,21 @@ function startLocalIpcServer() {
     });
   });
 
+  let ipcRetried = false;
   localIpcServer.on("error", (err) => {
     if (err.code === "EADDRINUSE") {
-      console.warn(`[Bridge IPC] Puerto ${LOCAL_IPC_PORT} ocupado — otro bridge corriendo?`);
+      if (ipcRetried) {
+        console.warn(`[Bridge IPC] Puerto ${LOCAL_IPC_PORT} sigue ocupado tras intentar liberarlo — desisto.`);
+        return;
+      }
+      ipcRetried = true;
+      console.warn(`[Bridge IPC] Puerto ${LOCAL_IPC_PORT} ocupado — buscando zombie para liberarlo…`);
+      const freed = killProcessOnPort(LOCAL_IPC_PORT);
+      setTimeout(() => {
+        try { localIpcServer.listen(LOCAL_IPC_PORT, LOCAL_IPC_HOST); } catch (e) {
+          console.warn("[Bridge IPC] Retry listen falló:", e.message);
+        }
+      }, freed ? 1500 : 3000);
     } else {
       console.warn("[Bridge IPC] Server error:", err.message);
     }
@@ -870,6 +990,125 @@ function disconnect() {
   }
 }
 
+// ─── Repair flow — bajo demanda desde tray o /lab ──────────────
+// Cierra todo, limpia caché de Electron, opcionalmente borra config y
+// reinicia el proceso. Pensado para cuando algo se sintomatiza (no abre,
+// no conecta, métricas en -99 dB) y el Pastor no quiere tocar Task Manager.
+async function repairBridge({ wipeToken = false, silent = false } = {}) {
+  if (!silent) {
+    const opts = {
+      type: "warning",
+      buttons: wipeToken
+        ? ["Reparar y desvincular", "Cancelar"]
+        : ["Reparar (mantener vinculación)", "Cancelar"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Reparar CUBI Bridge",
+      message: wipeToken
+        ? "Esto cerrará todo, borrará la configuración local, desvinculará el estudio del Coproductor y reiniciará el Bridge. Tendrás que generar un código nuevo en /lab para volver a vincular."
+        : "Esto cerrará la conexión actual, limpiará la caché de Electron y reiniciará el Bridge. La vinculación con el Coproductor se mantiene.",
+    };
+    const result = await dialog.showMessageBox(opts);
+    if (result.response !== 0) return false;
+  }
+
+  console.log(`[Bridge] Repair iniciado (wipeToken=${wipeToken})`);
+
+  try {
+    disconnect();
+    stopLocalIpcServer();
+    closeCaptureWindow();
+    closeOverlayWindow();
+    if (pairingWindow && !pairingWindow.isDestroyed()) {
+      try { pairingWindow.close(); } catch {}
+    }
+  } catch (e) {
+    console.warn("[Bridge] repair cleanup falló:", e.message);
+  }
+
+  // Limpia caché de Electron (cookies/cache/serviceworkers/etc) — el token vive en electron-store, NO acá.
+  try {
+    const sess = session.defaultSession;
+    await sess.clearCache();
+    await sess.clearStorageData({
+      storages: ["serviceworkers", "shadercache", "cachestorage", "websql", "filesystem"],
+    });
+  } catch (e) {
+    console.warn("[Bridge] clearCache falló:", e.message);
+  }
+
+  if (wipeToken) {
+    try { store.clear(); } catch (e) { console.warn("[Bridge] store.clear falló:", e.message); }
+  } else {
+    // Limpia flags transitorios pero preserva lo esencial (token, autoLaunch, overlay).
+    const preserved = {
+      token: store.get("token"),
+      userId: store.get("userId"),
+      overlay: store.get("overlay"),
+      autoLaunchConfigured: store.get("autoLaunchConfigured"),
+    };
+    try { store.clear(); } catch {}
+    for (const [k, v] of Object.entries(preserved)) {
+      if (v !== undefined && v !== null) {
+        try { store.set(k, v); } catch {}
+      }
+    }
+  }
+
+  // Mata cualquier Bridge zombie hermano que pueda estar reteniendo el lock futuro
+  killZombieBridges();
+  killProcessOnPort(LOCAL_IPC_PORT);
+
+  // Borra el PID file viejo para no confundir al próximo arranque
+  try { fs.unlinkSync(PID_FILE); } catch {}
+
+  console.log("[Bridge] Repair completo — relanzando…");
+  setTimeout(() => {
+    try {
+      app.relaunch();
+      app.exit(0);
+    } catch (e) {
+      console.error("[Bridge] relaunch falló:", e.message);
+      app.exit(1);
+    }
+  }, 500);
+  return true;
+}
+
+ipcMain.handle("bridge:repair", async (_e, opts) => {
+  try {
+    const ok = await repairBridge(opts || {});
+    return { ok };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// Crash recovery — si una excepción no capturada llega al main process,
+// loguear y relanzar suave en vez de morir en silencio dejando al Pastor
+// sin HUD ni tray.
+let crashRecoveryFired = false;
+process.on("uncaughtException", (err) => {
+  console.error("[Bridge] uncaughtException:", err);
+  if (crashRecoveryFired) return;
+  crashRecoveryFired = true;
+  try {
+    disconnect();
+    stopLocalIpcServer();
+  } catch {}
+  setTimeout(() => {
+    try {
+      app.relaunch();
+      app.exit(1);
+    } catch {
+      process.exit(1);
+    }
+  }, 1000);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("[Bridge] unhandledRejection:", err);
+});
+
 function scheduleReconnect() {
   if (isPaused) return;
   if (!store.get("token")) return;
@@ -881,16 +1120,41 @@ function scheduleReconnect() {
   console.log(`[Bridge] Reintentando en ${reconnectDelay / 1000}s`);
 }
 
-// ─── Single-instance + handlers de shortcuts externos ──────────
+// ─── Single-instance + recovery de zombie lock ──────────────────
 // Si el Pastor hace doble-click al shortcut "Mostrar HUD CUBI" mientras el
-// Bridge ya corre en tray, electron normalmente abriria una segunda instancia.
-// Con el lock, el segundo proceso muere y nos manda sus argv para que el
-// proceso vivo reaccione (toggle del HUD).
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+// Bridge ya corre en tray, el segundo proceso muere y nos manda sus argv para
+// que el proceso vivo reaccione (toggle del HUD).
+//
+// HARDENING v1.6.0: si el lock lo tiene un proceso ZOMBIE (Electron crasheado
+// sin liberar el lock, lo más común tras un Windows update o un OOM del DAW),
+// detectamos vía PID file que el dueño está muerto, lo matamos con taskkill
+// y reintentamos el lock UNA vez. Si aún falla, asumimos otra instancia viva
+// legítima y salimos en silencio.
+let gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  const otherPid = readPidFile();
+  const otherAlive = isPidAlive(otherPid);
+  if (!otherAlive) {
+    console.warn(`[Bridge] Lock retenido por proceso zombie (PID ${otherPid ?? "?"} muerto). Recuperando…`);
+    killZombieBridges();
+    // Esperita corta para que Windows libere el lock del proceso muerto
+    const t0 = Date.now();
+    while (Date.now() - t0 < 1500) { /* busy wait — único caso de uso */ }
+    gotSingleInstanceLock = app.requestSingleInstanceLock();
+    if (gotSingleInstanceLock) {
+      console.log("[Bridge] Lock recuperado tras matar zombie — continuando arranque.");
+    }
+  }
+}
 if (!gotSingleInstanceLock) {
   console.log("[Bridge] Otra instancia ya corre — saliendo.");
   app.quit();
 } else {
+  // Heartbeat: regrabar el PID cada 30s para que un Bridge futuro pueda
+  // detectar staleness (timestamp viejo + PID muerto = zombie a matar).
+  writePidFile();
+  setInterval(writePidFile, 30000);
+
   app.on("second-instance", (_event, argv) => {
     try {
       if (argv.includes("--toggle-hud")) {
