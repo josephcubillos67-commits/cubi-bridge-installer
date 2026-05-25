@@ -1,0 +1,62 @@
+name: Build & Release CUBI Bridge
+
+# Se dispara al pushear un tag con formato bridge-v1.2.3 (o ejecucion manual).
+# Construye el .exe NSIS en Windows y lo publica como Release Asset.
+#
+# Como cortar release nueva:
+#   1. Bumpear "version" en package.json (ej: 1.4.1 -> 1.4.2)
+#   2. Commit + push a main
+#   3. Crear release nuevo desde GitHub UI -> tag bridge-v1.4.2
+#   4. En ~5 min el CUBI-Bridge-Setup.exe aparece en Assets
+
+on:
+  push:
+    tags:
+      - 'bridge-v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # necesario para que electron-builder suba assets al release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build NSIS installer + publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win nsis --publish always
+
+      # Red de seguridad: aunque "publish" falle, el .exe queda descargable
+      # manualmente desde Actions -> este workflow run -> Artifacts por 30 dias.
+      - name: Upload installer as workflow artifact (safety net)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CUBI-Bridge-Setup-exe
+          path: release/CUBI-Bridge-Setup.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Diagnostico: lista exacto lo que electron-builder genero.
+      - name: List release/ contents (debug)
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path release) {
+            Get-ChildItem -Recurse release | Select-Object FullName, Length | Format-Table -AutoSize
+          } else {
+            Write-Host "::warning::carpeta release/ no existe — electron-builder no genero output"
+          }
