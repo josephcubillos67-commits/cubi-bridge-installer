@@ -1,4 +1,4 @@
-name: Build & Release CUBI Bridge
+name: .github/workflows/release.ymlBuild & Release CUBI Bridge
 
 # Se dispara al pushear un tag con formato bridge-v1.2.3 (o ejecucion manual).
 # Construye el .exe NSIS en Windows y lo publica como Release Asset.
