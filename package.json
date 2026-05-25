@@ -1,0 +1,90 @@
+{
+  "name": "cubi-bridge",
+  "version": "1.4.1",
+  "description": "CUBI Bridge — Observador READ-ONLY del estudio del Pastor Jose Cubillos. Conecta Cubase con el Coproductor IA en apocalipsisconcafe.com.",
+  "main": "main.js",
+  "author": {
+    "name": "CUBI Records",
+    "email": "soporte@apocalipsisconcafe.com"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/josephcubillos67-commits/cubi-bridge-installer.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --publish never",
+    "release": "electron-builder --win nsis --publish always"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.3.9",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.cubirecords.bridge",
+    "productName": "CUBI Bridge",
+    "copyright": "Copyright © 2026 CUBI Records",
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "capture.html",
+      "pairing.html",
+      "overlay.html",
+      "cubi-bridge-icon.ico",
+      "vst3-simulator.js",
+      "README.md",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "cubi-bridge-icon.ico",
+      "artifactName": "CUBI-Bridge-Setup.${ext}",
+      "publisherName": "CUBI Records",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CUBI Bridge",
+      "menuCategory": "CUBI Records",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "cubi-bridge-icon.ico",
+      "uninstallerIcon": "cubi-bridge-icon.ico",
+      "license": "build/license-es.txt",
+      "language": "1034",
+      "installerLanguages": ["es_ES"],
+      "warningsAsErrors": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "josephcubillos67-commits",
+        "repo": "cubi-bridge-installer",
+        "releaseType": "release",
+        "publishAutoUpdate": true
+      }
+    ]
+  }
+}

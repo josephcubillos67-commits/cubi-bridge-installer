@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>CUBI Floating HUD</title>
+  <style>
+    /* ============================================================
+     * CUBI Floating HUD — copiloto silencioso encima de Cubase
+     * ============================================================
+     * READ-ONLY: sólo muestra. Nada de esta ventana toca al DAW.
+     * Vanilla JS/CSS — sin React ni frameworks — para arranque
+     * instantáneo, footprint mínimo y cero stutters.
+     * ADN CUBI: cero modal, cero wizard. Drag-handle arriba,
+     * toggle compacto/expandido, ningún paso ni configuración.
+     * ============================================================ */
+    :root {
+      --bg: #08120c;
+      --bg-pane: #040806;
+      --border: #1a2520;
+      --green: #22c55e;
+      --gold: #D4AF37;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --yellow: #eab308;
+      --muted: #6b7280;
+      --text: #e5e7eb;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      background: transparent;
+      color: var(--text);
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #frame {
+      width: 100%; height: 100%;
+      background: var(--bg);
+      border: 1px solid #22c55e44;
+      border-radius: 10px;
+      display: flex; flex-direction: column;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      overflow: hidden;
+    }
+    /* Header: drag handle + acciones */
+    #header {
+      -webkit-app-region: drag;
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      cursor: move;
+    }
+    #dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    #title {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--green); font-weight: 600;
+      flex: 1;
+    }
+    .hdr-btn {
+      -webkit-app-region: no-drag;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      width: 22px; height: 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+    }
+    .hdr-btn:hover { color: var(--text); border-color: var(--gold); }
+    /* Cuerpo */
+    #body { padding: 8px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; flex: 1; }
+    /* Métricas */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+    }
+    .metric {
+      background: var(--bg-pane);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 5px;
+      text-align: center;
+    }
+    .metric-label {
+      font-size: 8px; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); margin-bottom: 2px;
+    }
+    .metric-value {
+      font-size: 14px; font-weight: 700; line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .metric-unit { font-size: 8px; opacity: 0.6; margin-left: 1px; font-weight: 400; }
+    /* Sparkline */
+    .sparkline-wrap {
+      background: var(--bg-pane);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 6px;
+    }
+    .sparkline-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 2px;
+    }
+    .sparkline-label {
+      font-size: 8px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    canvas { display: block; width: 100%; height: 30px; }
+    /* Bandas */
+    .bands {
+      display: flex; align-items: flex-end;
+      gap: 2px;
+      height: 32px;
+    }
+    .band {
+      flex: 1;
+      background: var(--green);
+      border-radius: 2px 2px 0 0;
+      transition: height 150ms ease-out, background-color 150ms;
+      opacity: 0.9;
+      min-height: 1px;
+    }
+    .band.hot { background: var(--gold); }
+    /* Observación */
+    .obs {
+      border-radius: 4px;
+      border: 1px solid;
+      padding: 6px 8px;
+      font-size: 11px;
+      line-height: 1.3;
+      display: flex; gap: 6px; align-items: flex-start;
+    }
+    .obs-icon { font-size: 12px; flex-shrink: 0; line-height: 1.2; }
+    .obs-text { flex: 1; }
+    .obs-critical { border-color: #ef444466; background: #1a0a0a; color: var(--red); }
+    .obs-warn { border-color: #eab30866; background: #1a160a; color: var(--yellow); }
+    .obs-info { border-color: #3b82f666; background: #0a121a; color: var(--blue); }
+    .obs-good { border-color: #22c55e66; background: #0a1a10; color: var(--green); }
+    /* Plugin crítico */
+    .plugin-crit {
+      font-size: 10px; color: #e5d4a8;
+      background: #0a0806;
+      border: 1px solid #D4AF3744;
+      border-radius: 4px;
+      padding: 4px 6px;
+      display: flex; gap: 5px; align-items: center;
+    }
+    .plugin-crit.hot { border-color: #ef444488; color: var(--red); }
+    .plugin-crit-icon { font-size: 11px; }
+    /* Estado vacío */
+    .empty {
+      color: var(--muted); font-size: 10px;
+      text-align: center; padding: 16px 8px;
+      font-style: italic;
+    }
+    /* Botón abrir LAB */
+    .lab-btn {
+      -webkit-app-region: no-drag;
+      background: linear-gradient(135deg, #800020, #a00028);
+      border: 1px solid var(--gold);
+      color: var(--gold);
+      padding: 6px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      transition: all 0.15s;
+      width: 100%;
+      flex-shrink: 0;
+    }
+    .lab-btn:hover { background: linear-gradient(135deg, #a00028, #c00030); }
+    /* MODO COMPACTO: ocultar todo menos LUFS + observación */
+    body.compact #body { gap: 5px; padding: 6px; }
+    body.compact .metrics-grid {
+      grid-template-columns: 1fr;
+    }
+    body.compact .metric:not(.metric-primary) { display: none; }
+    body.compact .metric-primary .metric-value { font-size: 24px; }
+    body.compact .sparkline-wrap,
+    body.compact .bands-wrap,
+    body.compact .plugin-crit,
+    body.compact .lab-btn { display: none; }
+    body.compact .obs { padding: 4px 6px; font-size: 10px; }
+  </style>
+</head>
+<body>
+  <div id="frame">
+    <div id="header">
+      <div id="dot"></div>
+      <div id="title">CUBI · Estudio en vivo</div>
+      <button class="hdr-btn" id="btn-compact" title="Modo compacto / expandido">◐</button>
+      <button class="hdr-btn" id="btn-close" title="Ocultar HUD">×</button>
+    </div>
+    <div id="body">
+      <div class="metrics-grid">
+        <div class="metric metric-primary">
+          <div class="metric-label">Volumen</div>
+          <div class="metric-value" id="m-lufs" style="color: var(--green);">—<span class="metric-unit">LUFS</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Pico</div>
+          <div class="metric-value" id="m-tp" style="color: var(--blue);">—<span class="metric-unit">dB</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Cuerpo</div>
+          <div class="metric-value" id="m-rms" style="color: var(--gold);">—<span class="metric-unit">dB</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Dinámica</div>
+          <div class="metric-value" id="m-crest" style="color: var(--green);">—<span class="metric-unit">dB</span></div>
+        </div>
+      </div>
+
+      <div class="sparkline-wrap">
+        <div class="sparkline-header">
+          <span class="sparkline-label">Tendencia volumen · 60s</span>
+          <span class="sparkline-label">meta −14</span>
+        </div>
+        <canvas id="spark-lufs"></canvas>
+      </div>
+
+      <div class="bands-wrap">
+        <div class="bands" id="bands">
+          <div class="band" data-band="sub"></div>
+          <div class="band" data-band="low"></div>
+          <div class="band" data-band="lowMid"></div>
+          <div class="band" data-band="mid"></div>
+          <div class="band" data-band="highMid"></div>
+          <div class="band" data-band="high"></div>
+          <div class="band" data-band="air"></div>
+          <div class="band" data-band="top"></div>
+        </div>
+      </div>
+
+      <div id="plugin-crit-wrap"></div>
+
+      <div id="obs-wrap">
+        <div class="empty">Escuchando tu mezcla…</div>
+      </div>
+
+      <button class="lab-btn" id="btn-lab">🎛 Abrir LAB completo</button>
+    </div>
+  </div>
+
+  <script>
+    /* ─── Estado local ───────────────────────────────────────── */
+    const HISTORY = 120; // 60s @ 500ms
+    const lufsHistory = [];
+    let latestObs = null;
+    let latestPlugins = null;
+
+    /* ─── Helpers de render ──────────────────────────────────── */
+    const $ = (id) => document.getElementById(id);
+
+    function fmt(v, dec = 1) {
+      return (v != null && isFinite(v)) ? v.toFixed(dec) : "—";
+    }
+
+    function setMetric(id, val, fallback = "—") {
+      const el = $(id);
+      const txt = (val != null && isFinite(val)) ? val.toFixed(1) : fallback;
+      const unit = el.querySelector(".metric-unit").outerHTML;
+      el.innerHTML = txt + unit;
+    }
+
+    function colorTP(tp) {
+      if (tp == null) return "var(--blue)";
+      return tp > -1 ? "var(--red)" : "var(--blue)";
+    }
+    function colorCrest(c) {
+      if (c == null) return "var(--green)";
+      return c < 6 ? "var(--red)" : "var(--green)";
+    }
+
+    function renderMetrics(m) {
+      if (!m) return;
+      setMetric("m-lufs", m.lufs);
+      setMetric("m-tp", m.truePeak);
+      $("m-tp").style.color = colorTP(m.truePeak);
+      setMetric("m-rms", m.rms);
+      setMetric("m-crest", m.crest);
+      $("m-crest").style.color = colorCrest(m.crest);
+
+      // Bandas: -60dB → 0%, 0dB → 100%
+      if (m.bands) {
+        for (const b of document.querySelectorAll(".band")) {
+          const k = b.dataset.band;
+          const dB = m.bands[k];
+          if (dB == null) { b.style.height = "0%"; b.style.opacity = "0.2"; continue; }
+          const pct = Math.max(0, Math.min(100, ((dB + 60) / 60) * 100));
+          b.style.height = pct + "%";
+          b.style.opacity = "0.9";
+          if (dB > -10) b.classList.add("hot"); else b.classList.remove("hot");
+        }
+      }
+
+      // Sparkline LUFS
+      if (m.lufs != null && isFinite(m.lufs)) {
+        lufsHistory.push(m.lufs);
+        if (lufsHistory.length > HISTORY) lufsHistory.shift();
+      } else {
+        lufsHistory.push(null);
+        if (lufsHistory.length > HISTORY) lufsHistory.shift();
+      }
+      drawSparkline();
+    }
+
+    function drawSparkline() {
+      const canvas = $("spark-lufs");
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr; canvas.height = h * dpr;
+        ctx.scale(dpr, dpr);
+      }
+      ctx.clearRect(0, 0, w, h);
+
+      // Línea meta -14 LUFS
+      const min = -36, max = 0, target = -14;
+      const ty = h - ((target - min) / (max - min)) * h;
+      ctx.strokeStyle = "#D4AF3755";
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(w, ty); ctx.stroke();
+      ctx.setLineDash([]);
+
+      if (lufsHistory.length < 2) return;
+      ctx.strokeStyle = "#22c55e";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < lufsHistory.length; i++) {
+        const v = lufsHistory[i];
+        if (v == null || !isFinite(v)) continue;
+        const x = (i / (HISTORY - 1)) * w;
+        const clamped = Math.max(min, Math.min(max, v));
+        const y = h - ((clamped - min) / (max - min)) * h;
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    /* ─── Observaciones ──────────────────────────────────────── */
+    const SEV_ICON = { critical: "⚠️", warn: "⚡", info: "ℹ️", good: "✓" };
+
+    function renderObs(ob) {
+      const wrap = $("obs-wrap");
+      if (!ob) {
+        wrap.innerHTML = '<div class="empty">Escuchando tu mezcla…</div>';
+        return;
+      }
+      const icon = SEV_ICON[ob.severity] || "ℹ️";
+      const cls = "obs-" + (ob.severity || "info");
+      wrap.innerHTML = `
+        <div class="obs ${cls}">
+          <div class="obs-icon">${icon}</div>
+          <div class="obs-text">${escapeHtml(ob.text)}</div>
+        </div>`;
+    }
+
+    /* ─── Plugin crítico ─────────────────────────────────────── */
+    // Si la cadena del master tiene un plugin con gainReduction > 4dB, lo
+    // mostramos como tarjeta "Pro-L2 golpeando 5dB". Si no, ocultamos.
+    function renderPluginCritical(chain) {
+      const wrap = $("plugin-crit-wrap");
+      if (!chain || !chain.plugins || chain.plugins.length === 0) {
+        wrap.innerHTML = "";
+        return;
+      }
+      // Buscar el plugin con mayor GR (limiter/comp)
+      let crit = null;
+      for (const p of chain.plugins) {
+        if (p.bypass) continue;
+        if (p.gainReductionDb == null) continue;
+        if (!crit || p.gainReductionDb > (crit.gainReductionDb ?? 0)) crit = p;
+      }
+      if (!crit || (crit.gainReductionDb ?? 0) < 2) {
+        wrap.innerHTML = "";
+        return;
+      }
+      const hot = (crit.gainReductionDb ?? 0) > 4;
+      const icon = hot ? "🔥" : "🎚";
+      const verb = hot ? "golpeando" : "comprimiendo";
+      wrap.innerHTML = `
+        <div class="plugin-crit ${hot ? "hot" : ""}">
+          <span class="plugin-crit-icon">${icon}</span>
+          <span>${escapeHtml(crit.name)} ${verb} ${crit.gainReductionDb.toFixed(1)} dB</span>
+        </div>`;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[c]);
+    }
+
+    /* ─── Wiring de eventos ──────────────────────────────────── */
+    if (window.overlayAPI) {
+      window.overlayAPI.onMetrics(renderMetrics);
+      window.overlayAPI.onObservations((obs) => {
+        // Mostramos la observación de mayor severidad; el resto queda implícito.
+        if (!Array.isArray(obs) || obs.length === 0) return;
+        const order = { critical: 0, warn: 1, info: 2, good: 3 };
+        const sorted = [...obs].sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+        latestObs = sorted[0];
+        renderObs(latestObs);
+        // Auto-fade después de 45s para no quedar pegada con info vieja.
+        clearTimeout(window._obsFadeTimer);
+        window._obsFadeTimer = setTimeout(() => {
+          latestObs = null;
+          renderObs(null);
+        }, 45000);
+      });
+      window.overlayAPI.onPlugins((snap) => {
+        latestPlugins = snap;
+        renderPluginCritical(snap);
+      });
+      window.overlayAPI.onStatus((s) => {
+        $("dot").style.background = s?.connected ? "var(--green)" : "var(--red)";
+        $("title").textContent = s?.connected ? "CUBI · Estudio en vivo" : "CUBI · Sin conexión";
+      });
+    }
+
+    $("btn-compact").addEventListener("click", () => {
+      window.overlayAPI?.toggleCompact();
+    });
+    $("btn-close").addEventListener("click", () => {
+      window.overlayAPI?.close();
+    });
+    $("btn-lab").addEventListener("click", () => {
+      window.overlayAPI?.openLab();
+    });
+
+    // El main process nos avisará si entramos/salimos de modo compacto
+    // (lo controla él porque también cambia el tamaño de la ventana).
+    if (window.overlayAPI?.onStatus) {
+      // hack: usamos un canal genérico para modo compacto
+      // (lo agregamos al preload si hace falta)
+    }
+  </script>
+</body>
+</html>

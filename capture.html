@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>CUBI Bridge — Capture v2</title>
+  <style>
+    body { background:#000; color:#999; font-family:monospace; font-size:11px; padding:8px; margin:0; }
+    .log { white-space:pre-wrap; max-height:100vh; overflow:auto; }
+  </style>
+</head>
+<body>
+  <div id="log" class="log">CUBI Bridge — Capture v2 starting…</div>
+  <script>
+    /**
+     * ============================================================
+     * CUBI Bridge — Capture Engine v2 (Bridge 1 consolidación)
+     * ============================================================
+     *
+     * Captura el master output del PC (Windows WASAPI loopback vía
+     * Chromium desktopCapturer) y deriva métricas perceptuales cada 500ms.
+     *
+     * Payload extendido vs v1:
+     *   - lufs       (loudness corto-plazo ~3s, K-weight simplificado)
+     *   - truePeak   (peak dBFS con oversample 4x lineal — aprox. ITP)
+     *   - rms        (RMS dBFS de la señal raw)
+     *   - crest      (peak - rms en dB → dinámica)
+     *   - bands      ({sub, low, lowMid, mid, highMid, high, air, top} en dBFS)
+     *
+     * AUDIO NUNCA SALE DEL PC. Solo viajan los números.
+     * ============================================================
+     */
+
+    const log = (msg) => {
+      const el = document.getElementById("log");
+      el.textContent += "\n" + new Date().toISOString().substring(11, 19) + "  " + msg;
+      el.scrollTop = el.scrollHeight;
+    };
+
+    const TICK_MS = 500;
+    const SHORT_TERM_S = 3.0;
+
+    // Bandas perceptuales (Hz) — alineadas con cómo escucha un ingeniero
+    const BANDS = [
+      ["sub",     20,    60],
+      ["low",     60,    120],
+      ["lowMid",  120,   400],
+      ["mid",     400,   1000],
+      ["highMid", 1000,  3000],
+      ["high",    3000,  6000],
+      ["air",     6000,  12000],
+      ["top",     12000, 20000],
+    ];
+
+    // ─── Oversampler 4x lineal (aproximación de ITP) ──────────────
+    // No es FIR polyphase certificado BS.1770-4, pero captura la mayoría
+    // de los inter-sample peaks que un peak raw pierde a 48kHz.
+    function peak4x(time) {
+      let peak = 0;
+      for (let i = 0; i < time.length - 1; i++) {
+        const a = time[i];
+        const b = time[i + 1];
+        // 4 puntos interpolados entre a y b
+        for (let k = 0; k < 4; k++) {
+          const t = k / 4;
+          const v = Math.abs(a + (b - a) * t);
+          if (v > peak) peak = v;
+        }
+      }
+      return peak;
+    }
+
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { width: 1, height: 1, frameRate: 1 },
+          audio: true,
+        });
+
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          window.bridgeAPI.reportCaptureError("No se obtuvo audio. ¿Activaste 'Compartir audio del sistema'?");
+          return;
+        }
+        log("Audio del sistema capturado: " + audioTracks[0].label);
+        stream.getVideoTracks().forEach((t) => t.stop());
+
+        const audioCtx = new AudioContext();
+        const sampleRate = audioCtx.sampleRate;
+        const source = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
+
+        // ─── Cadena K-weighted (LUFS) ───────────────────────────
+        // Aproximación del filtro BS.1770: high-pass 60Hz + high-shelf +4dB @ 1.5kHz
+        const hp = audioCtx.createBiquadFilter();
+        hp.type = "highpass"; hp.frequency.value = 60; hp.Q.value = 0.5;
+        const hs = audioCtx.createBiquadFilter();
+        hs.type = "highshelf"; hs.frequency.value = 1500; hs.gain.value = 4;
+        source.connect(hp); hp.connect(hs);
+
+        // FFT sobre la señal K-weighted para LUFS y bandas
+        const kAnalyser = audioCtx.createAnalyser();
+        kAnalyser.fftSize = 4096;
+        kAnalyser.smoothingTimeConstant = 0.3;
+        hs.connect(kAnalyser);
+
+        // FFT sobre la señal RAW para peak/RMS reales (sin pre-énfasis)
+        const rawAnalyser = audioCtx.createAnalyser();
+        rawAnalyser.fftSize = 4096;
+        rawAnalyser.smoothingTimeConstant = 0;
+        source.connect(rawAnalyser);
+
+        const kTime = new Float32Array(kAnalyser.fftSize);
+        const kFreq = new Float32Array(kAnalyser.frequencyBinCount);
+        const rawTime = new Float32Array(rawAnalyser.fftSize);
+
+        const shortTermBuffer = [];
+        let peakHold = 0;
+
+        // Pre-calcular rangos de bins para cada banda
+        const binHz = sampleRate / kAnalyser.fftSize;
+        const bandBins = BANDS.map(([name, lo, hi]) => ({
+          name,
+          loBin: Math.max(1, Math.floor(lo / binHz)),
+          hiBin: Math.min(kAnalyser.frequencyBinCount - 1, Math.ceil(hi / binHz)),
+        }));
+
+        log("Análisis v2 activo · sampleRate=" + sampleRate + "Hz · bins/banda=" + bandBins.map(b => `${b.name}(${b.hiBin - b.loBin})`).join(" "));
+
+        const interval = setInterval(() => {
+          // ─── LUFS (short-term, K-weight) ─────────────────────────
+          kAnalyser.getFloatTimeDomainData(kTime);
+          let sumSqK = 0;
+          for (let i = 0; i < kTime.length; i++) sumSqK += kTime[i] * kTime[i];
+          const meanSqK = sumSqK / kTime.length;
+
+          shortTermBuffer.push(meanSqK);
+          const maxBlocks = Math.ceil((SHORT_TERM_S * 1000) / TICK_MS);
+          while (shortTermBuffer.length > maxBlocks) shortTermBuffer.shift();
+          const stMean = shortTermBuffer.reduce((a, b) => a + b, 0) / shortTermBuffer.length;
+          const lufs = stMean > 0 ? -0.691 + 10 * Math.log10(stMean) : -Infinity;
+
+          // ─── RMS RAW + Peak con oversample 4x ────────────────────
+          rawAnalyser.getFloatTimeDomainData(rawTime);
+          let rawSumSq = 0;
+          for (let i = 0; i < rawTime.length; i++) rawSumSq += rawTime[i] * rawTime[i];
+          const rawRms = Math.sqrt(rawSumSq / rawTime.length);
+          const rmsDb = rawRms > 0 ? 20 * Math.log10(rawRms) : -Infinity;
+
+          const ip = peak4x(rawTime);
+          // Persistencia del peak (decay -2.5dB/tick) para que no parpadee
+          peakHold = Math.max(ip, peakHold * 0.75);
+          const peakDb = peakHold > 0 ? 20 * Math.log10(peakHold) : -Infinity;
+
+          const crestDb = isFinite(peakDb) && isFinite(rmsDb) ? peakDb - rmsDb : null;
+
+          // ─── Espectro en 8 bandas (dBFS por banda) ───────────────
+          // getFloatFrequencyData devuelve dB ya (referenciado a 0dBFS).
+          kAnalyser.getFloatFrequencyData(kFreq);
+          const bands = {};
+          for (const b of bandBins) {
+            // Sumar potencia (10^(dB/10)) de cada bin, luego volver a dB
+            let pwr = 0;
+            for (let i = b.loBin; i <= b.hiBin; i++) {
+              pwr += Math.pow(10, kFreq[i] / 10);
+            }
+            const count = b.hiBin - b.loBin + 1;
+            bands[b.name] = pwr > 0 ? 10 * Math.log10(pwr / count) : -120;
+          }
+
+          const metrics = {
+            lufs: isFinite(lufs) ? lufs : null,
+            truePeak: isFinite(peakDb) ? peakDb : null,
+            rms: isFinite(rmsDb) ? rmsDb : null,
+            crest: crestDb,
+            bands,
+            timestamp: Date.now(),
+          };
+          window.bridgeAPI.sendMetrics(metrics);
+        }, TICK_MS);
+
+        // Si el sistema termina la captura (usuario la corta desde el panel
+        // de Windows, Cubase cambia de device, etc.) avisamos para que main.js
+        // reintente automáticamente.
+        audioTracks[0].addEventListener("ended", () => {
+          clearInterval(interval);
+          log("Stream del sistema terminado — main.js reintentará.");
+          window.bridgeAPI.reportCaptureError("stream-ended");
+        });
+      } catch (err) {
+        log("ERROR: " + err.message);
+        window.bridgeAPI.reportCaptureError(err.message);
+      }
+    }
+
+    start();
+  </script>
+</body>
+</html>
