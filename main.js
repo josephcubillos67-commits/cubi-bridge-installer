@@ -557,6 +557,37 @@ ipcMain.on("overlay:toggle-compact", () => {
   toggleOverlayCompact();
 });
 
+// Pastor 25-may-2026 · Live Copilot interactivo (HUD v2):
+// El input de chat del HUD manda mensajes acá; los reenviamos al server por la
+// misma WS autenticada del Bridge. La respuesta vuelve por el handler de ws.on("message")
+// más abajo (msg.type === "live-reply") y se reenvía al overlayWindow por IPC.
+ipcMain.on("overlay:send-live-message", (_event, payload) => {
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      forwardToOverlay("overlay:live-reply", {
+        reqId: payload?.reqId || null,
+        ok: false,
+        text: "Bridge desconectado. Reconectá desde el tray.",
+        reason: "bridge-offline",
+        ts: Date.now(),
+      });
+      return;
+    }
+    const text = String(payload?.text || "").slice(0, 500);
+    const reqId = String(payload?.reqId || `live-${Date.now()}`);
+    ws.send(JSON.stringify({ type: "live-message", reqId, text }));
+  } catch (e) {
+    console.error("[Bridge] overlay:send-live-message fallo:", e?.message || e);
+    forwardToOverlay("overlay:live-reply", {
+      reqId: payload?.reqId || null,
+      ok: false,
+      text: "Error mandando el mensaje al cerebro.",
+      reason: "send-error",
+      ts: Date.now(),
+    });
+  }
+});
+
 ipcMain.on("bridge:capture-error", (_event, msg) => {
   console.warn("[Bridge] Captura falló:", msg);
   lastCaptureError = msg;
@@ -712,7 +743,14 @@ function openOverlayWindow() {
   if (b.compact) overlayWindow.webContents.once("did-finish-load", () => {
     overlayWindow.webContents.executeJavaScript('document.body.classList.add("compact")').catch(() => {});
   });
-  overlayWindow.loadFile("overlay.html");
+  // Pastor 25-may-2026 · graduación al Jarvis HUD v2 (interactivo).
+  // El HUD v1 (overlay.html) era read-only. El v2 trae input de chat,
+  // 7 estados visuales animados, glassmorphism, 3 modos de tamaño.
+  // Si el v2 no carga por cualquier motivo, fallback al v1.
+  const v2Path = path.join(__dirname, "overlay-v2", "index.html");
+  const v1Path = path.join(__dirname, "overlay.html");
+  const overlayFile = require("fs").existsSync(v2Path) ? v2Path : v1Path;
+  overlayWindow.loadFile(overlayFile);
 
   // Push de estado actual al abrir + último snapshot de plugins (si lo hay)
   overlayWindow.webContents.once("did-finish-load", () => {
@@ -835,6 +873,17 @@ function connect() {
         // Engine para que la ventana flotante las muestre encima de Cubase sin
         // requerir abrir el navegador.
         forwardToOverlay("overlay:observations", msg.obs);
+      } else if (msg.type === "live-reply") {
+        // Pastor 25-may-2026 · respuesta del Live Copilot interactivo.
+        // Vino por la misma WS del Bridge tras un live-message enviado
+        // desde el HUD. La reenviamos al overlayWindow vía IPC.
+        forwardToOverlay("overlay:live-reply", {
+          reqId: msg.reqId || null,
+          ok: !!msg.ok,
+          text: msg.text || "",
+          reason: msg.reason || null,
+          ts: msg.ts || Date.now(),
+        });
       }
     } catch {}
   });
@@ -1040,18 +1089,11 @@ async function repairBridge({ wipeToken = false, silent = false } = {}) {
   if (wipeToken) {
     try { store.clear(); } catch (e) { console.warn("[Bridge] store.clear falló:", e.message); }
   } else {
-    // Limpia flags transitorios pero preserva lo esencial (token, autoLaunch, overlay).
-    const preserved = {
-      token: store.get("token"),
-      userId: store.get("userId"),
-      overlay: store.get("overlay"),
-      autoLaunchConfigured: store.get("autoLaunchConfigured"),
-    };
-    try { store.clear(); } catch {}
-    for (const [k, v] of Object.entries(preserved)) {
-      if (v !== undefined && v !== null) {
-        try { store.set(k, v); } catch {}
-      }
+    // Deny-list: borrar SOLO flags transitorios conocidos. Si una versión futura
+    // agrega settings persistentes, sobreviven al repair sin tocar este código.
+    const TRANSIENT_KEYS = ["hudFirstShown", "__health_probe__"];
+    for (const k of TRANSIENT_KEYS) {
+      try { store.delete(k); } catch {}
     }
   }
 
