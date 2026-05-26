@@ -32,6 +32,10 @@ const os = require("os");
 const fs = require("fs");
 const { execSync } = require("child_process");
 
+// CP5 — Canal WRITE separado (MIDI OUT a loopMIDI). Módulo
+// completamente aislado del observer READ-ONLY. OFF por defecto.
+const bridgeWrite = require("./bridge-write");
+
 // ════════════════════════════════════════════════════════════════
 // HARDENING v1.6.0 — Self-heal del launcher (Windows)
 // ════════════════════════════════════════════════════════════════
@@ -544,6 +548,39 @@ ipcMain.on("bridge:metrics", (_event, metrics) => {
   forwardToOverlay("overlay:metrics", metrics);
 });
 
+// Bridge 1.9.0 — perfil musical (BPM/key/tempo/groove/energy/dinámica/crescendo)
+// READ-ONLY local: solo va al overlay. NO se manda al server (cero coste de red
+// y cero tracking — son métricas derivadas de las que el server ya tiene).
+ipcMain.on("bridge:music-profile", (_event, profile) => {
+  forwardToOverlay("overlay:music-profile", profile);
+});
+
+// Bridge 1.9.0 — STYLE/REFERENCE/CHARACTER request del HUD overlay.
+// El overlay vive en file:// (sin cookies), así que NO puede hacer fetch al
+// server. Reusamos la WS autenticada del bridge — mismo patrón que live-message.
+// Server responde con {type:"style-tag-reply", reqId, ok, style, reference, character}.
+ipcMain.on("overlay:request-style-tag", (_event, payload) => {
+  try {
+    const reqId = String(payload?.reqId || `style-${Date.now()}`);
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      forwardToOverlay("overlay:style-tag-reply", {
+        reqId, ok: false, reason: "bridge-offline",
+      });
+      return;
+    }
+    ws.send(JSON.stringify({
+      type: "style-tag-request",
+      reqId,
+      payload: payload?.payload || {},
+    }));
+  } catch (e) {
+    console.error("[Bridge] overlay:request-style-tag fallo:", e?.message || e);
+    forwardToOverlay("overlay:style-tag-reply", {
+      reqId: payload?.reqId || null, ok: false, reason: "send-error",
+    });
+  }
+});
+
 // IPC del Floating HUD overlay — todas las acciones son locales o
 // no-destructivas. Cero bytes hacia Cubase.
 ipcMain.on("overlay:open-lab", () => {
@@ -869,6 +906,19 @@ function toggleOverlayCompact() {
   store.set("overlay", { ...saved, compact: nextCompact });
 }
 
+// Bridge 1.9.0 — añadir relay de style-tag-reply desde la WS del server al overlay.
+// Se llama desde el handler central de ws.on("message") más abajo.
+function relayStyleTagReply(msg) {
+  forwardToOverlay("overlay:style-tag-reply", {
+    reqId: msg?.reqId || null,
+    ok: !!msg?.ok,
+    style: msg?.style || null,
+    reference: msg?.reference || null,
+    character: msg?.character || null,
+    reason: msg?.reason || null,
+  });
+}
+
 function forwardToOverlay(channel, payload) {
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     try { overlayWindow.webContents.send(channel, payload); } catch {}
@@ -892,6 +942,9 @@ function connect() {
     reconnectDelay = RECONNECT_BASE_MS;
     captureRestartCount = 0;
     updateTrayState("connected");
+    // CP5 — wire del canal WRITE (MIDI OUT). OFF por defecto hasta
+    // que el server mande midi_config{enabled:true} desde /lab.
+    try { bridgeWrite.attach(ws); } catch (e) { console.warn("[Bridge] bridgeWrite.attach:", e && e.message); }
     // Hello inicial con capabilities (seam para Bridge 2/3)
     ws.send(JSON.stringify({
       type: "hello",
@@ -939,6 +992,11 @@ function connect() {
         // Engine para que la ventana flotante las muestre encima de Cubase sin
         // requerir abrir el navegador.
         forwardToOverlay("overlay:observations", msg.obs);
+      } else if (msg.type === "style-tag-reply") {
+        // Bridge 1.9.0 — respuesta del STYLE/REFERENCE/CHARACTER pedido
+        // desde el HUD overlay. El server llama coproductor-style.computeStyleTag()
+        // y manda la respuesta por la misma WS. Reenviamos al overlay vía IPC.
+        relayStyleTagReply(msg);
       } else if (msg.type === "live-reply") {
         // Pastor 25-may-2026 · respuesta del Live Copilot interactivo.
         // Vino por la misma WS del Bridge tras un live-message enviado
@@ -953,6 +1011,9 @@ function connect() {
           audioUsed: !!msg.audioUsed,
           ts: msg.ts || Date.now(),
         });
+      } else if (msg.type === "midi_config" || msg.type === "midi_out") {
+        // CP5 — delegado al módulo WRITE separado.
+        try { bridgeWrite.handleServerMessage(msg); } catch (e) { console.warn("[Bridge WRITE] handle:", e && e.message); }
       } else if (msg.type === "audio-clip-request" && msg.clipReqId) {
         // 1.8.0 — el server pide los últimos N segundos del master para
         // mandárselos a Gemini Audio. Reenviamos a la ventana de captura
@@ -989,6 +1050,8 @@ function connect() {
     clearTimeout(captureRestartTimer);
     captureRestartTimer = null;
     closeCaptureWindow();
+    // CP5 — cerrar puerto MIDI al perder WS
+    try { bridgeWrite.detach(); } catch {}
     updateTrayState(isPaused ? "paused" : "disconnected");
 
     // Anti ping-pong: si el servidor nos cerró por token inválido, fuimos

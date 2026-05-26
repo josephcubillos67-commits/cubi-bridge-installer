@@ -277,6 +277,304 @@
           window.bridgeAPI.sendMetrics(metrics);
         }, TICK_MS);
 
+        // ════════════════════════════════════════════════════════════════
+        // MUSIC ANALYZER (BRIDGE 1.9.0) — Pastor 26-may-2026
+        // ════════════════════════════════════════════════════════════════
+        // Reemplaza la esfera idle del HUD con monitores musicales vivos.
+        // Calcula 100% LOCAL (cero coste IA):
+        //   BPM         — autocorrelación sobre envelope de energía (sub-bajo)
+        //   KEY         — chroma vector + Krumhansl-Schmuckler (24 templates)
+        //   TEMPO       — desviación estándar BPM últimas 6 mediciones
+        //   GROOVE      — densidad de transients / BPM esperado
+        //   ENERGY      — banda LUFS short-term (Baja/Media/Alta/Saturada)
+        //   CRESCENDO   — pendiente LUFS últimos 10s (↗ / → / ↘)
+        //   DINÁMICA    — crest factor band (Aplastado/Vivo/Cinemático)
+        // Se ejecuta cada 2s. Manda profile via sendMusicProfile().
+        // ════════════════════════════════════════════════════════════════
+        const ENV_HOP = 1024;                                  // ~21ms @ 48kHz
+        const ENV_RATE = sampleRate / ENV_HOP;                 // ~46.875 Hz
+        const ENV_WINDOW_SEC = 8;
+        const ENV_MAX = Math.ceil(ENV_RATE * ENV_WINDOW_SEC);  // ~375 samples
+        const envelopeRing = new Float32Array(ENV_MAX);
+        let envWriteIdx = 0;
+        let envFilled = 0;
+
+        const bpmHistory = [];          // últimos N BPM válidos (para stability)
+        const lufsCrescRing = [];       // [{ts, lufs}] últimos ~10s
+        const BPM_HISTORY_MAX = 8;
+        const LUFS_CRESC_WINDOW_MS = 10_000;
+
+        // Krumhansl-Schmuckler key profiles (mayor / menor, normalizados)
+        const KS_MAJOR = [6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88];
+        const KS_MINOR = [6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+        const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+        // EMA cross-tick para suavizar key (evita parpadeo)
+        const chromaEMA = new Float32Array(12);
+        const CHROMA_ALPHA = 0.35;
+
+        // Pre-cómputo: para cada bin FFT, ¿qué pitch class le toca?
+        // (solo bins en rango musical 60Hz..5kHz — fuera de eso no aporta tonal info)
+        const PITCH_BIN_MIN = Math.max(1, Math.floor(60 / binHz));
+        const PITCH_BIN_MAX = Math.min(kAnalyser.frequencyBinCount - 1, Math.ceil(5000 / binHz));
+        const binPitchClass = new Int16Array(PITCH_BIN_MAX + 1);
+        const binWeight = new Float32Array(PITCH_BIN_MAX + 1);
+        for (let i = PITCH_BIN_MIN; i <= PITCH_BIN_MAX; i++) {
+          const freq = i * binHz;
+          const midi = 69 + 12 * Math.log2(freq / 440);
+          const pc = ((Math.round(midi) % 12) + 12) % 12;
+          binPitchClass[i] = pc;
+          // Peso 1/freq atenúa harmonicos altos (los fundamentales pesan más)
+          binWeight[i] = 1 / Math.sqrt(freq);
+        }
+
+        let musicTickCounter = 0;
+
+        // Helper: actualizar envelope ring con el rawTime fresco del tick.
+        // Convertimos rawTime → samples de RMS-envelope (~21ms hops).
+        // Pastor 26-may-2026 (architect fix): usar tickDurSec REAL en vez de
+        // 0.5 fijo. Con jitter del scheduler, el bloque "nuevo" varía ±200ms,
+        // y un valor fijo introducía solapamiento o huecos en el envelope.
+        function ingestEnvelope(actualTickDurSec) {
+          const tickSec = (typeof actualTickDurSec === "number" && actualTickDurSec > 0)
+            ? Math.min(2.0, actualTickDurSec)
+            : 0.5;
+          const newSamples = Math.min(FFT_SIZE, Math.round(tickSec * sampleRate));
+          const start = FFT_SIZE - newSamples;
+          for (let i = start; i + ENV_HOP <= FFT_SIZE; i += ENV_HOP) {
+            let s = 0;
+            for (let j = 0; j < ENV_HOP; j++) {
+              const v = rawTime[i + j];
+              s += v * v;
+            }
+            const env = Math.sqrt(s / ENV_HOP);
+            envelopeRing[envWriteIdx] = env;
+            envWriteIdx = (envWriteIdx + 1) % ENV_MAX;
+            if (envFilled < ENV_MAX) envFilled++;
+          }
+        }
+
+        // Autocorrelación sobre envelope → BPM (60..180)
+        function detectBpm() {
+          if (envFilled < ENV_MAX * 0.6) return null;
+          // Snapshot lineal del ring (más viejo → más reciente)
+          const env = new Float32Array(envFilled);
+          for (let i = 0; i < envFilled; i++) {
+            env[i] = envelopeRing[(envWriteIdx + ENV_MAX - envFilled + i) % ENV_MAX];
+          }
+          // Remover media (DC)
+          let mean = 0; for (let i = 0; i < env.length; i++) mean += env[i]; mean /= env.length;
+          for (let i = 0; i < env.length; i++) env[i] -= mean;
+
+          const minLag = Math.floor((60 / 180) * ENV_RATE);   // 180 BPM
+          const maxLag = Math.floor((60 / 60) * ENV_RATE);    // 60 BPM
+
+          // NCCF (normalized cross-correlation function) — architect fix.
+          // Score crudo Σ env[i]*env[i+lag] sesga a lags cortos (más términos
+          // sumados → score mayor por construcción). Normalizamos por
+          // sqrt(Σ env[i]² · Σ env[i+lag]²) en cada lag para que el rango
+          // [60..180] BPM compita en igualdad de condiciones.
+          let bestLag = 0, bestScore = -Infinity;
+          let secondScore = -Infinity;
+          for (let lag = minLag; lag <= maxLag; lag++) {
+            let s = 0, n1 = 0, n2 = 0;
+            const N = env.length - lag;
+            for (let i = 0; i < N; i++) {
+              const a = env[i], b = env[i + lag];
+              s += a * b;
+              n1 += a * a;
+              n2 += b * b;
+            }
+            const denom = Math.sqrt(n1 * n2);
+            const score = denom > 0 ? s / denom : 0;
+            if (score > bestScore) {
+              secondScore = bestScore;
+              bestScore = score;
+              bestLag = lag;
+            } else if (score > secondScore) {
+              secondScore = score;
+            }
+          }
+          if (bestLag === 0 || bestScore <= 0) return null;
+          const bpm = (60 * ENV_RATE) / bestLag;
+          // Confianza: cuán claro el pico vs el segundo candidato + nivel absoluto NCCF.
+          // bestScore ∈ [-1..1] (correlación normalizada). gap diferencia ganador.
+          const gap = bestScore - secondScore;
+          const conf = Math.max(0, Math.min(100, Math.round(bestScore * 70 + gap * 200)));
+          if (conf < 15) return null;
+          return { bpm: Math.round(bpm), confidence: conf };
+        }
+
+        // Chroma + Krumhansl → KEY (con confianza)
+        function detectKey() {
+          // Asumimos kFreq actualizado por el tick principal (siempre se llama antes)
+          const chroma = new Float32Array(12);
+          for (let i = PITCH_BIN_MIN; i <= PITCH_BIN_MAX; i++) {
+            const mag = Math.pow(10, kFreq[i] / 20);  // dB → lineal
+            chroma[binPitchClass[i]] += mag * binWeight[i];
+          }
+          // Normalizar
+          let max = 0;
+          for (let i = 0; i < 12; i++) if (chroma[i] > max) max = chroma[i];
+          if (max <= 0) return null;
+          for (let i = 0; i < 12; i++) chroma[i] /= max;
+
+          // EMA cross-tick para suavizar
+          for (let i = 0; i < 12; i++) {
+            chromaEMA[i] = CHROMA_ALPHA * chroma[i] + (1 - CHROMA_ALPHA) * chromaEMA[i];
+          }
+
+          // Correlacionar con los 24 perfiles (12 mayores + 12 menores)
+          let bestKey = "", bestScore = -Infinity, secondScore = -Infinity;
+          for (let tonic = 0; tonic < 12; tonic++) {
+            for (const [mode, template] of [["maj", KS_MAJOR], ["min", KS_MINOR]]) {
+              let dot = 0, normT = 0, normC = 0;
+              for (let i = 0; i < 12; i++) {
+                const t = template[(i - tonic + 12) % 12];
+                dot += t * chromaEMA[i];
+                normT += t * t;
+                normC += chromaEMA[i] * chromaEMA[i];
+              }
+              const score = dot / (Math.sqrt(normT * normC) + 1e-9);
+              if (score > bestScore) {
+                secondScore = bestScore;
+                bestScore = score;
+                bestKey = NOTE_NAMES[tonic] + (mode === "min" ? "m" : "");
+              } else if (score > secondScore) {
+                secondScore = score;
+              }
+            }
+          }
+          // Confianza: cuán claro es el ganador vs el segundo (gap)
+          const gap = bestScore - secondScore;
+          const conf = Math.max(0, Math.min(100, Math.round(gap * 600)));
+          return { key: bestKey, confidence: conf };
+        }
+
+        // Etiquetas legibles a partir de métricas locales
+        function energyLabel(lufs) {
+          if (lufs == null || !isFinite(lufs)) return "—";
+          if (lufs < -23) return "Baja";
+          if (lufs < -14) return "Media";
+          if (lufs < -8)  return "Alta";
+          return "Saturada";
+        }
+        function dynamicsLabel(crest) {
+          if (crest == null || !isFinite(crest)) return "—";
+          if (crest < 6)  return "Aplastado";
+          if (crest < 10) return "Comprimido";
+          if (crest < 14) return "Vivo";
+          return "Cinemático";
+        }
+        function tempoLabel(bpmList) {
+          if (bpmList.length < 3) return "Calibrando";
+          const m = bpmList.reduce((s,v)=>s+v,0) / bpmList.length;
+          let v = 0; for (const x of bpmList) v += (x-m)*(x-m); v /= bpmList.length;
+          const sd = Math.sqrt(v);
+          if (sd < 2)  return "Estable";
+          if (sd < 5)  return "Suelto";
+          return "Variando";
+        }
+        function crescendoLabel(crescRing) {
+          if (crescRing.length < 4) return "→";
+          const first = crescRing[0].lufs, last = crescRing[crescRing.length-1].lufs;
+          if (!isFinite(first) || !isFinite(last)) return "→";
+          const delta = last - first;
+          if (delta > 1.2)  return "↗";
+          if (delta < -1.2) return "↘";
+          return "→";
+        }
+        function grooveLabel(env, bpm) {
+          if (!bpm || envFilled < ENV_MAX * 0.5) return "—";
+          // Contar picos en el envelope (umbral adaptativo)
+          let mean = 0, max = 0;
+          for (let i = 0; i < envFilled; i++) {
+            const v = envelopeRing[(envWriteIdx + ENV_MAX - envFilled + i) % ENV_MAX];
+            mean += v; if (v > max) max = v;
+          }
+          mean /= envFilled;
+          const thr = mean + (max - mean) * 0.55;
+          let peaks = 0;
+          let prev = 0;
+          for (let i = 0; i < envFilled; i++) {
+            const v = envelopeRing[(envWriteIdx + ENV_MAX - envFilled + i) % ENV_MAX];
+            if (v > thr && v > prev) peaks++;
+            prev = v;
+          }
+          const secs = envFilled / ENV_RATE;
+          const peaksPerBeat = (peaks / secs) / (bpm / 60);
+          if (peaksPerBeat < 0.5) return "Suave";
+          if (peaksPerBeat < 1.3) return "Marcado";
+          return "Denso";
+        }
+
+        // Hook al setInterval principal: actualiza envelope ring cada tick
+        // y crescendo ring (usamos LUFS short-term que ya se calcula arriba).
+        // Pasamos el tickDurSec REAL (varía con jitter del scheduler) al ingest
+        // para que el envelope mantenga continuidad sin huecos ni solapamiento.
+        const _origSendMetrics = window.bridgeAPI.sendMetrics;
+        let lastEnvIngestTs = performance.now();
+        window.bridgeAPI.sendMetrics = function(metrics) {
+          _origSendMetrics(metrics);
+          try {
+            const nowPerf = performance.now();
+            const tickDurSec = Math.max(0.05, (nowPerf - lastEnvIngestTs) / 1000);
+            lastEnvIngestTs = nowPerf;
+            ingestEnvelope(tickDurSec);
+            if (metrics && metrics.lufs != null && isFinite(metrics.lufs)) {
+              const nowTs = Date.now();
+              lufsCrescRing.push({ ts: nowTs, lufs: metrics.lufs });
+              const cutoff = nowTs - LUFS_CRESC_WINDOW_MS;
+              while (lufsCrescRing.length > 1 && lufsCrescRing[0].ts < cutoff) lufsCrescRing.shift();
+            }
+          } catch (e) { /* silencioso — no romper el tick principal */ }
+        };
+
+        // Tick musical cada 2s: BPM, KEY, etiquetas → IPC
+        setInterval(() => {
+          musicTickCounter++;
+          try {
+            const bpmRes = detectBpm();
+            const keyRes = detectKey();
+            if (bpmRes) {
+              bpmHistory.push(bpmRes.bpm);
+              while (bpmHistory.length > BPM_HISTORY_MAX) bpmHistory.shift();
+            }
+            const lastM = lufsCrescRing.length > 0 ? lufsCrescRing[lufsCrescRing.length-1] : null;
+            // Para crest: re-leemos de las clases ya calculadas no es posible;
+            // usamos el último valor enviado vía sendMetrics interceptado.
+            // Aproximación buena: calculamos crest aquí desde rawTime fresh.
+            rawAnalyser.getFloatTimeDomainData(rawTime);
+            let rmsSq = 0, peak = 0;
+            for (let i = 0; i < rawTime.length; i++) {
+              const v = Math.abs(rawTime[i]);
+              if (v > peak) peak = v;
+              rmsSq += rawTime[i] * rawTime[i];
+            }
+            const rmsLin = Math.sqrt(rmsSq / rawTime.length);
+            const crestDb = (peak > 0 && rmsLin > 0) ? 20*Math.log10(peak/rmsLin) : null;
+
+            const profile = {
+              ts: Date.now(),
+              bpm: bpmRes ? bpmRes.bpm : null,
+              bpmConfidence: bpmRes ? bpmRes.confidence : 0,
+              key: keyRes ? keyRes.key : null,
+              keyConfidence: keyRes ? keyRes.confidence : 0,
+              tempoLabel: tempoLabel(bpmHistory),
+              grooveLabel: grooveLabel(null, bpmRes ? bpmRes.bpm : null),
+              energyLabel: energyLabel(lastM ? lastM.lufs : null),
+              dynamicsLabel: dynamicsLabel(crestDb),
+              crescendoLabel: crescendoLabel(lufsCrescRing),
+            };
+            if (typeof window.bridgeAPI.sendMusicProfile === "function") {
+              window.bridgeAPI.sendMusicProfile(profile);
+            }
+          } catch (e) {
+            log("WARN music-analyzer: " + e.message);
+          }
+        }, 2000);
+        // ════════════════════════════════════════════════════════════════
+
         // ────────────────────────────────────────────────────────────────
         // BRIDGE 1.8.0 — Buffer circular de audio para Gemini Audio on-demand
         // ────────────────────────────────────────────────────────────────

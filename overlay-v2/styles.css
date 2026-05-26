@@ -419,18 +419,153 @@ body[data-mode="compact"] #metrics-strip { display: none; }
   min-height: 0;
 }
 
+/* Pastor 26-may-2026: la orb idle es linda pero come espacio del chat.
+   Reemplazada por #music-monitors (BPM/KEY/ENERGY/STYLE/etc). El panel
+   visualizer legacy queda oculto — los estados se comunican por el header. */
 #visualizer {
-  height: 160px;
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-bottom: 1px solid var(--border-glass);
-  background:
-    radial-gradient(ellipse at center, rgba(212, 175, 55, 0.04) 0%, transparent 70%);
-  overflow: hidden;
-  flex-shrink: 0;
+  display: none !important;
 }
+
+/* ============================================================
+ * MUSIC MONITORS — Pastor 26-may-2026 (Bridge 1.9.0)
+ * ============================================================
+ * Grilla que ocupa el espacio que dejó la orb. 3 filas:
+ *   1) BPM (grande con pulso) · KEY · ENERGÍA
+ *   2) ESTILO (wide) · REFERENCIA
+ *   3) Chips: Tempo / Groove / Dinámica / Crescendo
+ * Todo READ-ONLY. Cero interacción con Cubase. */
+#music-monitors {
+  flex-shrink: 0;
+  padding: 10px 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.10);
+}
+.mm-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.mm-row-bottom {
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 2px;
+}
+.mm-card {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+  background: linear-gradient(135deg, rgba(107, 15, 26, 0.22) 0%, rgba(28, 14, 18, 0.55) 100%);
+  border: 1px solid rgba(212, 175, 55, 0.18);
+  border-radius: 8px;
+  padding: 8px 10px 6px;
+  text-align: center;
+  overflow: hidden;
+  transition: border-color 320ms ease, background 320ms ease;
+}
+.mm-card:hover {
+  border-color: rgba(212, 175, 55, 0.32);
+}
+.mm-wide { flex: 2; }
+.mm-val {
+  font-family: var(--font-display, "Inter", system-ui, sans-serif);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.05;
+  color: var(--gold, #D4AF37);
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 14px rgba(212, 175, 55, 0.25);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mm-val-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f5e9d0;
+  text-shadow: none;
+}
+.mm-lbl {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(212, 175, 55, 0.55);
+  margin-top: 2px;
+}
+/* Pulso del BPM: el borde dorado late al tempo detectado.
+   Duración seteada inline desde app.js: --bpm-period: <ms>. */
+.mm-bpm { overflow: visible; }
+.mm-pulse {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  border: 1.5px solid rgba(212, 175, 55, 0);
+  pointer-events: none;
+  animation: mm-bpm-pulse var(--bpm-period, 500ms) ease-in-out infinite;
+}
+@keyframes mm-bpm-pulse {
+  0%, 100% { border-color: rgba(212, 175, 55, 0); box-shadow: 0 0 0 rgba(212, 175, 55, 0); }
+  18% { border-color: rgba(212, 175, 55, 0.55); box-shadow: 0 0 16px rgba(212, 175, 55, 0.28); }
+}
+/* Card en estado "sin señal" — gris atenuado */
+.mm-card.mm-dim .mm-val { color: rgba(245, 233, 208, 0.35); text-shadow: none; }
+.mm-card.mm-dim .mm-lbl { color: rgba(245, 233, 208, 0.25); }
+.mm-card.mm-dim .mm-pulse { animation: none; border-color: transparent; }
+
+/* Confianza baja: asterisco titubeo */
+.mm-val .mm-low-conf {
+  font-size: 0.55em;
+  color: rgba(212, 175, 55, 0.5);
+  vertical-align: super;
+  margin-left: 2px;
+}
+
+/* Chips inferiores (Tempo/Groove/Dinámica/Crescendo) */
+.mm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  background: rgba(212, 175, 55, 0.06);
+  border: 1px solid rgba(212, 175, 55, 0.14);
+  border-radius: 999px;
+  font-size: 10px;
+  color: #f5e9d0;
+  white-space: nowrap;
+}
+.mm-chip-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--gold, #D4AF37);
+  box-shadow: 0 0 6px rgba(212, 175, 55, 0.6);
+}
+.mm-chip-lbl {
+  color: rgba(245, 233, 208, 0.5);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 9px;
+}
+.mm-chip-val {
+  font-weight: 600;
+  color: var(--gold, #D4AF37);
+}
+.mm-crescendo {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* Modo compacto del HUD: monitores en una sola fila densa */
+body[data-mode="compact"] #music-monitors {
+  padding: 6px 10px;
+}
+body[data-mode="compact"] .mm-row-mid,
+body[data-mode="compact"] .mm-row-bottom {
+  display: none;
+}
+body[data-mode="compact"] .mm-val { font-size: 16px; }
+body[data-mode="compact"] .mm-lbl { font-size: 8px; }
 
 .viz {
   position: absolute;
@@ -714,6 +849,20 @@ body[data-state="processing"] .viz-processing {
   transform: translateY(-4px) scale(0.96);
   transition: opacity 220ms ease, transform 220ms ease;
   pointer-events: none;
+}
+
+/* Botón "borrar todo el chat" en el header — Pastor 26-may-2026
+   Confirmación inline (sin modal, ADN CUBI): primer click pone el botón rojo
+   con pulse durante 2.5s; segundo click dentro de esa ventana confirma y limpia. */
+#btn-clear-chat[data-confirming="true"] {
+  color: var(--red);
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.55);
+  animation: clear-pulse 0.7s ease-in-out infinite;
+}
+@keyframes clear-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+  50%      { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
 }
 
 /* Severidad visual diferenciada — Pastor 26-may-2026

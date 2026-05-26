@@ -41,6 +41,9 @@
         <button class="ctrl-btn" id="btn-dock" title="Acoplar al borde de la pantalla" aria-label="Acoplar lateral">
           <svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" fill="currentColor" opacity="0.6"/><rect x="8" y="2" width="6" height="12" fill="none" stroke="currentColor" stroke-width="1"/></svg>
         </button>
+        <button class="ctrl-btn" id="btn-clear-chat" title="Borrar todo el chat" aria-label="Borrar todo el chat" data-confirming="false">
+          <svg viewBox="0 0 16 16"><path d="M3 5 h10 M5 5 v8 a1 1 0 0 0 1 1 h4 a1 1 0 0 0 1 -1 v-8 M6 5 v-1 a1 1 0 0 1 1 -1 h2 a1 1 0 0 1 1 1 v1 M6.5 7.5 v4 M9.5 7.5 v4" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <button class="ctrl-btn" id="btn-settings" title="Ajustes (transparencia, posición)" aria-label="Ajustes">
           <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1 v2 M8 13 v2 M1 8 h2 M13 8 h2 M3 3 l1.5 1.5 M11.5 11.5 l1.5 1.5 M3 13 l1.5 -1.5 M11.5 4.5 l1.5 -1.5" stroke="currentColor" stroke-width="1.5"/></svg>
         </button>
@@ -96,7 +99,46 @@
     <!-- BODY: visualizer + chat -->
     <main id="hud-body">
 
-      <!-- Panel de visualización del estado actual -->
+      <!-- MUSIC MONITORS — Pastor 26-may-2026: reemplazo de la orb idle.
+           BPM / KEY / ENERGY / DYNAMICS / GROOVE / TEMPO / CRESCENDO / STYLE.
+           Los primeros 7 vienen 100% LOCAL desde capture.html (overlay:music-profile, cada 2s).
+           STYLE + REFERENCE son interpretación IA (cache, solo cuando cambia el perfil).
+           Pulso del HUD sincronizado al BPM detectado (CSS animation-duration dinámico). -->
+      <section id="music-monitors" aria-label="Monitores musicales en vivo">
+        <div class="mm-row mm-row-top">
+          <div class="mm-card mm-bpm" id="mm-bpm-card">
+            <div class="mm-val" id="mm-bpm">—</div>
+            <div class="mm-lbl">BPM</div>
+            <div class="mm-pulse" id="mm-bpm-pulse"></div>
+          </div>
+          <div class="mm-card mm-key">
+            <div class="mm-val" id="mm-key">—</div>
+            <div class="mm-lbl">KEY</div>
+          </div>
+          <div class="mm-card mm-energy">
+            <div class="mm-val mm-val-text" id="mm-energy">—</div>
+            <div class="mm-lbl">ENERGÍA</div>
+          </div>
+        </div>
+        <div class="mm-row mm-row-mid">
+          <div class="mm-card mm-wide mm-style">
+            <div class="mm-val mm-val-text" id="mm-style">Esperando audio…</div>
+            <div class="mm-lbl">ESTILO</div>
+          </div>
+          <div class="mm-card mm-reference">
+            <div class="mm-val mm-val-text" id="mm-reference">—</div>
+            <div class="mm-lbl">REFERENCIA</div>
+          </div>
+        </div>
+        <div class="mm-row mm-row-bottom">
+          <span class="mm-chip"><span class="mm-chip-dot"></span><span class="mm-chip-lbl">Tempo</span><span class="mm-chip-val" id="mm-tempo">—</span></span>
+          <span class="mm-chip"><span class="mm-chip-dot"></span><span class="mm-chip-lbl">Groove</span><span class="mm-chip-val" id="mm-groove">—</span></span>
+          <span class="mm-chip"><span class="mm-chip-dot"></span><span class="mm-chip-lbl">Dinámica</span><span class="mm-chip-val" id="mm-dynamics">—</span></span>
+          <span class="mm-chip"><span class="mm-chip-dot"></span><span class="mm-chip-lbl">Crescendo</span><span class="mm-chip-val mm-crescendo" id="mm-crescendo">→</span></span>
+        </div>
+      </section>
+
+      <!-- Panel de visualización del estado actual (legacy — oculto via CSS) -->
       <section id="visualizer" aria-label="Estado del copiloto">
         <!-- IDLE: respiración vino→oro -->
         <div class="viz viz-idle" data-state="idle">

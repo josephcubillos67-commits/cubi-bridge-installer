@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld("bridgeAPI", {
   sendMetrics: (metrics) => ipcRenderer.send("bridge:metrics", metrics),
   reportCaptureError: (msg) => ipcRenderer.send("bridge:capture-error", msg),
 
+  // Bridge 1.9.0 — Perfil musical en vivo (BPM/key/tempo/groove/energy/dinámica/crescendo)
+  // Calculado 100% local en capture.html. Refresh cada 2s. Cero coste IA.
+  sendMusicProfile: (profile) => ipcRenderer.send("bridge:music-profile", profile),
+
   // Bridge 1.8.0 — Audio clip on-demand para Gemini Audio.
   // El server pide los últimos N segundos del master cuando el Pastor hace
   // una pregunta musical en el HUD. La ventana de captura devuelve un
@@ -44,6 +48,39 @@ contextBridge.exposeInMainWorld("overlayAPI", {
     const handler = (_e, s) => cb(s);
     ipcRenderer.on("overlay:status", handler);
     return () => ipcRenderer.removeListener("overlay:status", handler);
+  },
+  // Bridge 1.9.0 — perfil musical en vivo desde capture.html (cada 2s)
+  onMusicProfile: (cb) => {
+    const handler = (_e, p) => cb(p);
+    ipcRenderer.on("overlay:music-profile", handler);
+    return () => ipcRenderer.removeListener("overlay:music-profile", handler);
+  },
+  // Bridge 1.9.0 — STYLE/REFERENCE/CHARACTER vía WS autenticada del bridge.
+  // El overlay vive en file://, no puede hacer fetch al server directo.
+  // Pattern: idéntico a sendLiveMessage — reqId + reply correlacionada + timeout.
+  requestStyleTag: (payload) => {
+    const reqId = `style-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve) => {
+      const TIMEOUT_MS = 12_000;
+      const handler = (_e, r) => {
+        if (!r || r.reqId !== reqId) return;
+        ipcRenderer.removeListener("overlay:style-tag-reply", handler);
+        clearTimeout(timer);
+        resolve({
+          ok: !!r.ok,
+          style: r.style || null,
+          reference: r.reference || null,
+          character: r.character || null,
+          reason: r.reason || null,
+        });
+      };
+      const timer = setTimeout(() => {
+        ipcRenderer.removeListener("overlay:style-tag-reply", handler);
+        resolve({ ok: false, reason: "timeout" });
+      }, TIMEOUT_MS);
+      ipcRenderer.on("overlay:style-tag-reply", handler);
+      ipcRenderer.send("overlay:request-style-tag", { reqId, payload });
+    });
   },
 
   // Acciones (todas non-destructivas — no afectan a Cubase).

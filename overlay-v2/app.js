@@ -246,6 +246,33 @@ async function sendUserMessage() {
 $("#btn-mode").addEventListener("click", cycleMode);
 $("#btn-clickthrough").addEventListener("click", toggleClickthrough);
 $("#btn-dock").addEventListener("click", cycleDock);
+/* Botón "borrar todo el chat" — Pastor 26-may-2026
+   ADN CUBI: cero modal. Primer click → botón rojo pulsando 2.5s ("¿seguro?").
+   Segundo click dentro de la ventana → limpia el chat. Si pasan 2.5s sin
+   confirmar, vuelve a estado normal. */
+const clearChatBtn = $("#btn-clear-chat");
+let clearChatConfirmTimer = null;
+clearChatBtn.addEventListener("click", () => {
+  if (clearChatBtn.dataset.confirming === "true") {
+    clearTimeout(clearChatConfirmTimer);
+    clearChatConfirmTimer = null;
+    clearChatBtn.dataset.confirming = "false";
+    clearChatBtn.title = "Borrar todo el chat";
+    // Fade out de todos los mensajes y luego vaciar
+    const msgs = Array.from(chatLog.querySelectorAll(".msg"));
+    msgs.forEach(m => m.classList.add("removing"));
+    setTimeout(() => { chatLog.innerHTML = ""; }, 240);
+    return;
+  }
+  clearChatBtn.dataset.confirming = "true";
+  clearChatBtn.title = "Tocá de nuevo para confirmar";
+  clearChatConfirmTimer = setTimeout(() => {
+    clearChatBtn.dataset.confirming = "false";
+    clearChatBtn.title = "Borrar todo el chat";
+    clearChatConfirmTimer = null;
+  }, 2500);
+});
+
 $("#btn-settings").addEventListener("click", toggleSettings);
 $("#btn-close").addEventListener("click", () => {
   // En Electron real (HUD desktop): cerrar la ventana flotante via IPC.
@@ -471,6 +498,151 @@ window.addEventListener("resize", () => {
 });
 
 /* ============================================================
+ * MUSIC MONITORS — Pastor 26-may-2026 (Bridge 1.9.0)
+ * ============================================================
+ * Reemplazan la orb idle. 7 monitores locales + 2 IA cacheados:
+ *   LOCAL: bpm / key / energy / dynamics / groove / tempo / crescendo
+ *   IA:    style / reference
+ * Refresh local: 2s (suscripción overlay:music-profile).
+ * Refresh IA: solo cuando cambia BPM (±10), key, o energy band.
+ * ============================================================ */
+const musicState = {
+  lastProfile: null,
+  lastStyleSig: null,         // "bpm-bucket|key|energy" usado para gatear llamada IA
+  lastStyleAt: 0,             // último ts de llamada IA
+  STYLE_MIN_INTERVAL_MS: 25_000,  // hard floor entre llamadas, aunque cambie todo
+  STYLE_TTL_MS: 8 * 60_000,   // refrescar IA al menos cada 8 min aunque no cambie nada
+  styleCache: { style: null, reference: null, character: null },
+};
+
+function bpmBucket(bpm) {
+  if (!bpm) return "x";
+  return String(Math.round(bpm / 10) * 10);  // bucket de 10 BPM
+}
+function setMm(id, val, opts = {}) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = val == null || val === "" ? "—" : escapeHtml(String(val)) + (opts.suffix || "");
+}
+function setMmCardDim(cardId, dim) {
+  const el = document.getElementById(cardId);
+  if (!el) return;
+  el.classList.toggle("mm-dim", !!dim);
+}
+
+function renderMusicProfile(p) {
+  if (!p) return;
+  musicState.lastProfile = p;
+
+  // BPM — con * si la confianza es <40
+  const bpmTxt = p.bpm
+    ? `${p.bpm}${p.bpmConfidence < 40 ? '<span class="mm-low-conf">*</span>' : ''}`
+    : "—";
+  const bpmEl = document.getElementById("mm-bpm");
+  if (bpmEl) bpmEl.innerHTML = bpmTxt;
+  setMmCardDim("mm-bpm-card", !p.bpm);
+
+  // Pulso del HUD sincronizado al BPM detectado
+  if (p.bpm && p.bpm > 30 && p.bpm < 250) {
+    const periodMs = (60_000 / p.bpm);
+    const pulse = document.getElementById("mm-bpm-pulse");
+    if (pulse) pulse.style.setProperty("--bpm-period", `${periodMs}ms`);
+  }
+
+  // KEY — con * si confianza <30
+  const keyTxt = p.key
+    ? `${p.key}${p.keyConfidence < 30 ? '<span class="mm-low-conf">*</span>' : ''}`
+    : "—";
+  const keyEl = document.getElementById("mm-key");
+  if (keyEl) keyEl.innerHTML = keyTxt;
+
+  setMm("mm-energy", p.energyLabel || "—");
+  setMm("mm-tempo", p.tempoLabel || "—");
+  setMm("mm-groove", p.grooveLabel || "—");
+  setMm("mm-dynamics", p.dynamicsLabel || "—");
+  setMm("mm-crescendo", p.crescendoLabel || "→");
+
+  // ¿Toca refrescar STYLE / REFERENCE vía IA? (gateado, cacheado)
+  maybeFetchStyle(p);
+}
+
+async function maybeFetchStyle(p) {
+  // Necesitamos al menos BPM o KEY para que la IA tenga algo que interpretar
+  if (!p.bpm && !p.key) return;
+  const sig = `${bpmBucket(p.bpm)}|${p.key || "x"}|${p.energyLabel || "x"}|${p.grooveLabel || "x"}`;
+  const now = Date.now();
+  const ageMs = now - musicState.lastStyleAt;
+  const changed = sig !== musicState.lastStyleSig;
+  const tooSoon = ageMs < musicState.STYLE_MIN_INTERVAL_MS;
+  const stale = ageMs > musicState.STYLE_TTL_MS;
+
+  // Llamar IA solo si: (sig cambió y no es demasiado pronto) o (cache vieja)
+  if (!changed && !stale) return;
+  if (tooSoon && !stale) return;
+
+  musicState.lastStyleSig = sig;
+  musicState.lastStyleAt = now;
+
+  const payload = {
+    bpm: p.bpm,
+    key: p.key,
+    energy: p.energyLabel,
+    dynamics: p.dynamicsLabel,
+    groove: p.grooveLabel,
+    tempo: p.tempoLabel,
+    crescendo: p.crescendoLabel,
+  };
+
+  try {
+    let data = null;
+
+    // Preferido: vía WS autenticada del Bridge (overlay vive en file://, sin cookies).
+    // Si estamos en preview web (sin overlayAPI), caemos al fetch HTTP normal.
+    if (window.overlayAPI && typeof window.overlayAPI.requestStyleTag === "function") {
+      const r = await window.overlayAPI.requestStyleTag(payload);
+      if (r && r.ok) data = r;
+    } else {
+      const res = await fetch("/api/coproductor/style-tag", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) data = await res.json();
+    }
+
+    if (data && (data.style || data.reference || data.character)) {
+      musicState.styleCache = {
+        style: data.style || musicState.styleCache.style,
+        reference: data.reference || musicState.styleCache.reference,
+        character: data.character || musicState.styleCache.character,
+      };
+      if (musicState.styleCache.style) setMm("mm-style", musicState.styleCache.style);
+      if (musicState.styleCache.reference) setMm("mm-reference", musicState.styleCache.reference);
+    }
+  } catch (err) {
+    // Cero ruido al usuario — si falla, simplemente queda lo cacheado.
+    console.warn("[music-monitors] style-tag fail:", err.message);
+  }
+}
+
+// Auto-clear si no llegan music profiles en >8s (la pista paró)
+let lastMusicProfileAt = 0;
+setInterval(() => {
+  if (lastMusicProfileAt && Date.now() - lastMusicProfileAt > 8000) {
+    setMm("mm-bpm", "—");
+    setMm("mm-key", "—");
+    setMm("mm-energy", "—");
+    setMm("mm-tempo", "—");
+    setMm("mm-groove", "—");
+    setMm("mm-dynamics", "—");
+    setMm("mm-crescendo", "→");
+    setMmCardDim("mm-bpm-card", true);
+    lastMusicProfileAt = 0;
+  }
+}, 2500);
+
+/* ============================================================
  * MICRO-FEEDBACK AUTOMÁTICO (Observation Engine → chat)
  * ============================================================
  * Pastor 25-may-2026: cuando el motor heurístico del server detecta
@@ -575,6 +747,14 @@ window.addEventListener("DOMContentLoaded", () => {
     // El Bridge desktop empuja vía IPC overlay:metrics cada ~500ms.
     if (typeof window.overlayAPI?.onMetrics === "function") {
       window.overlayAPI.onMetrics(renderMetrics);
+    }
+    // Bridge 1.9.0 — perfil musical (BPM/key/tempo/groove/energy/dinámica/crescendo).
+    // Cada 2s desde capture.html. 100% local, cero coste IA en este path.
+    if (typeof window.overlayAPI?.onMusicProfile === "function") {
+      window.overlayAPI.onMusicProfile((p) => {
+        lastMusicProfileAt = Date.now();
+        renderMusicProfile(p);
+      });
     }
 
     // Suscripción al Observation Engine del server (vía main.js → IPC)
