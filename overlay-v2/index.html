@@ -50,6 +50,49 @@
       </div>
     </header>
 
+    <!-- METRICS STRIP: ingeniero de mastering en vivo -->
+    <!-- Pastor 26-may-2026: fusión del HUD técnico viejo dentro del Jarvis nuevo.
+         Arriba métricas reales del master (LUFS/Pico/Cuerpo/Dinámica) + tendencia 60s + 8 bandas.
+         Abajo, el copiloto conversacional. Ambos miran la misma sesión.
+         READ-ONLY total — los números vienen del Bridge, no se toca Cubase. -->
+    <section id="metrics-strip" aria-label="Métricas en vivo del master">
+      <div class="metrics-row">
+        <div class="metric primary">
+          <div class="metric-label">Volumen</div>
+          <div class="metric-value" id="m-lufs">—<span class="metric-unit">LUFS</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Pico</div>
+          <div class="metric-value" id="m-tp">—<span class="metric-unit">dBTP</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Cuerpo</div>
+          <div class="metric-value" id="m-rms">—<span class="metric-unit">dB</span></div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Dinámica</div>
+          <div class="metric-value" id="m-crest">—<span class="metric-unit">dB</span></div>
+        </div>
+      </div>
+      <div class="metrics-trend">
+        <div class="trend-header">
+          <span class="trend-label">Tendencia volumen · 60s</span>
+          <span class="trend-target">meta −14</span>
+        </div>
+        <canvas id="spark-lufs" aria-hidden="true"></canvas>
+      </div>
+      <div class="metrics-bands" id="bands" aria-label="Espectro por bandas">
+        <div class="band" data-band="sub"></div>
+        <div class="band" data-band="low"></div>
+        <div class="band" data-band="lowMid"></div>
+        <div class="band" data-band="mid"></div>
+        <div class="band" data-band="highMid"></div>
+        <div class="band" data-band="high"></div>
+        <div class="band" data-band="air"></div>
+        <div class="band" data-band="top"></div>
+      </div>
+    </section>
+
     <!-- BODY: visualizer + chat -->
     <main id="hud-body">
 

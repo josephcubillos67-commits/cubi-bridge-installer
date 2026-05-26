@@ -275,6 +275,179 @@ document.addEventListener("click", (e) => {
 });
 
 /* ============================================================
+ * METRICS STRIP — ingeniero de mastering en vivo
+ * ============================================================
+ * Pastor 26-may-2026: el Bridge desktop empuja métricas del master
+ * cada ~500ms via IPC (overlay:metrics). Acá las pintamos:
+ *   - 4 tarjetas grandes (Volumen/Pico/Cuerpo/Dinámica)
+ *   - Sparkline LUFS de los últimos 60s con línea meta -14
+ *   - 8 bandas de espectro (sub→top)
+ * Auto-clear si dejan de llegar (>4s) → "—".
+ * READ-ONLY: cero interacción con Cubase.
+ * ============================================================ */
+const SPARK_HISTORY = 120;          // 60s @ 500ms
+const SPARK_MIN = -36, SPARK_MAX = 0, SPARK_TARGET = -14;
+const lufsHistory = [];
+let lastMetricsAt = 0;
+const sparkCanvas = $("#spark-lufs");
+const sparkCtx = sparkCanvas ? sparkCanvas.getContext("2d") : null;
+
+function fmt1(v) {
+  return (v != null && isFinite(v)) ? v.toFixed(1) : "—";
+}
+function setMetricVal(id, val, klass) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const unitEl = el.querySelector(".metric-unit");
+  const unitHtml = unitEl ? unitEl.outerHTML : "";
+  el.innerHTML = fmt1(val) + unitHtml;
+  el.classList.remove("warn", "cool", "good");
+  if (klass) el.classList.add(klass);
+}
+function classForTP(tp) {
+  if (tp == null || !isFinite(tp)) return null;
+  if (tp > -1) return "warn";    // clipping inminente
+  if (tp > -3) return "cool";    // límite estrecho
+  return null;
+}
+function classForCrest(c) {
+  if (c == null || !isFinite(c)) return null;
+  if (c < 6) return "warn";      // master aplastado
+  if (c > 14) return "good";     // dinámica sana
+  return null;
+}
+function classForLufs(l) {
+  if (l == null || !isFinite(l)) return null;
+  if (l > -8) return "warn";     // demasiado caliente
+  if (l >= -16 && l <= -12) return "good";  // ventana streaming
+  return null;
+}
+function renderMetrics(m) {
+  if (!m) return;
+  lastMetricsAt = Date.now();
+  setMetricVal("m-lufs", m.lufs, classForLufs(m.lufs));
+  setMetricVal("m-tp", m.truePeak, classForTP(m.truePeak));
+  setMetricVal("m-rms", m.rms, null);
+  setMetricVal("m-crest", m.crest, classForCrest(m.crest));
+
+  // Bandas: -60dB → 0% altura, 0dB → 100%
+  if (m.bands) {
+    const bandEls = document.querySelectorAll(".metrics-bands .band");
+    bandEls.forEach((b) => {
+      const k = b.dataset.band;
+      const dB = m.bands[k];
+      if (dB == null || !isFinite(dB)) {
+        b.style.height = "2%";
+        b.classList.remove("hot");
+        return;
+      }
+      const pct = Math.max(2, Math.min(100, ((dB + 60) / 60) * 100));
+      b.style.height = pct + "%";
+      if (dB > -10) b.classList.add("hot"); else b.classList.remove("hot");
+    });
+  }
+
+  // Sparkline LUFS
+  if (m.lufs != null && isFinite(m.lufs)) {
+    lufsHistory.push(m.lufs);
+  } else {
+    lufsHistory.push(null);
+  }
+  while (lufsHistory.length > SPARK_HISTORY) lufsHistory.shift();
+  drawSparkline();
+}
+function drawSparkline() {
+  if (!sparkCtx || !sparkCanvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = sparkCanvas.clientWidth, h = sparkCanvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  if (sparkCanvas.width !== Math.round(w * dpr) || sparkCanvas.height !== Math.round(h * dpr)) {
+    sparkCanvas.width = Math.round(w * dpr);
+    sparkCanvas.height = Math.round(h * dpr);
+    sparkCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  sparkCtx.clearRect(0, 0, w, h);
+
+  // Línea meta -14 LUFS (dashed dorada)
+  const targetY = h - ((SPARK_TARGET - SPARK_MIN) / (SPARK_MAX - SPARK_MIN)) * h;
+  sparkCtx.strokeStyle = "rgba(212, 175, 55, 0.35)";
+  sparkCtx.lineWidth = 1;
+  sparkCtx.setLineDash([2, 3]);
+  sparkCtx.beginPath();
+  sparkCtx.moveTo(0, targetY);
+  sparkCtx.lineTo(w, targetY);
+  sparkCtx.stroke();
+  sparkCtx.setLineDash([]);
+
+  if (lufsHistory.length < 2) return;
+
+  // Gradiente vino→oro bajo la curva
+  const grad = sparkCtx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, "rgba(212, 175, 55, 0.35)");
+  grad.addColorStop(1, "rgba(107, 15, 26, 0.05)");
+
+  const points = [];
+  for (let i = 0; i < lufsHistory.length; i++) {
+    const v = lufsHistory[i];
+    if (v == null || !isFinite(v)) { points.push(null); continue; }
+    const x = (i / (SPARK_HISTORY - 1)) * w;
+    const clamped = Math.max(SPARK_MIN, Math.min(SPARK_MAX, v));
+    const y = h - ((clamped - SPARK_MIN) / (SPARK_MAX - SPARK_MIN)) * h;
+    points.push({ x, y });
+  }
+
+  // Área rellena
+  sparkCtx.fillStyle = grad;
+  sparkCtx.beginPath();
+  let opened = false;
+  let lastX = 0;
+  for (const p of points) {
+    if (!p) continue;
+    if (!opened) { sparkCtx.moveTo(p.x, h); sparkCtx.lineTo(p.x, p.y); opened = true; }
+    else sparkCtx.lineTo(p.x, p.y);
+    lastX = p.x;
+  }
+  if (opened) {
+    sparkCtx.lineTo(lastX, h);
+    sparkCtx.closePath();
+    sparkCtx.fill();
+  }
+
+  // Línea superior dorada
+  sparkCtx.strokeStyle = "#D4AF37";
+  sparkCtx.lineWidth = 1.5;
+  sparkCtx.beginPath();
+  let started = false;
+  for (const p of points) {
+    if (!p) { started = false; continue; }
+    if (!started) { sparkCtx.moveTo(p.x, p.y); started = true; }
+    else sparkCtx.lineTo(p.x, p.y);
+  }
+  sparkCtx.stroke();
+}
+
+// Auto-clear si el Bridge dejó de mandar métricas hace >4s.
+// El strip queda en "—" para no mentir con datos viejos.
+setInterval(() => {
+  if (lastMetricsAt && Date.now() - lastMetricsAt > 4000) {
+    setMetricVal("m-lufs", null, null);
+    setMetricVal("m-tp", null, null);
+    setMetricVal("m-rms", null, null);
+    setMetricVal("m-crest", null, null);
+    document.querySelectorAll(".metrics-bands .band").forEach((b) => {
+      b.style.height = "2%";
+      b.classList.remove("hot");
+    });
+    lastMetricsAt = 0;
+  }
+}, 2000);
+
+// Redibujar sparkline al resize de la ventana (el Pastor estira el HUD).
+window.addEventListener("resize", () => {
+  drawSparkline();
+});
+
+/* ============================================================
  * MICRO-FEEDBACK AUTOMÁTICO (Observation Engine → chat)
  * ============================================================
  * Pastor 25-may-2026: cuando el motor heurístico del server detecta
@@ -330,6 +503,16 @@ window.addEventListener("DOMContentLoaded", () => {
       role: "assistant",
       text: "Acá estoy. Bridge conectado — escucho tu sesión en vivo y aviso cuando algo cambie. Escribime cualquier duda; respondo en 1-2 líneas.",
     });
+
+    // Marcar body como "estamos en Electron" — el CSS deja el HUD ocupar
+    // 100% de la ventana real (resizable), en vez de la maqueta 480x720 del preview web.
+    document.body.setAttribute("data-electron", "true");
+
+    // Suscripción a métricas en vivo del master (LUFS / TP / RMS / Crest / bandas).
+    // El Bridge desktop empuja vía IPC overlay:metrics cada ~500ms.
+    if (typeof window.overlayAPI?.onMetrics === "function") {
+      window.overlayAPI.onMetrics(renderMetrics);
+    }
 
     // Suscripción al Observation Engine del server (vía main.js → IPC)
     if (typeof window.overlayAPI?.onObservations === "function") {

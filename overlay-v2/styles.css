@@ -109,8 +109,8 @@ body {
 #hud {
   position: relative;
   z-index: 1;
-  width: 480px;
-  height: 720px;
+  width: 100%;
+  height: 100%;
   background: var(--bg-glass);
   backdrop-filter: blur(28px) saturate(160%);
   -webkit-backdrop-filter: blur(28px) saturate(160%);
@@ -123,7 +123,23 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width var(--transition), height var(--transition), opacity 180ms;
+  transition: opacity 180ms;
+}
+
+/* Preview en browser: respetar el tamaño del v1 para no deformar la maqueta */
+@media (min-width: 541px) {
+  body:not([data-electron]) #hud {
+    width: 480px;
+    height: 720px;
+  }
+  body:not([data-electron])[data-mode="compact"] #hud {
+    width: 320px;
+    height: 80px;
+  }
+  body:not([data-electron])[data-mode="stadium"] #hud {
+    width: 720px;
+    height: 900px;
+  }
 }
 
 /* MODO COMPACTO */
@@ -272,6 +288,125 @@ body[data-dock="bottom"] #hud { transform: translateY(30%); }
   border-color: var(--gold);
   color: var(--gold);
 }
+
+/* ============================================================
+ * METRICS STRIP — ingeniero de mastering en vivo
+ * ============================================================
+ * Pastor 26-may-2026: arriba del visualizer, debajo del header.
+ * 4 métricas (Volumen/Pico/Cuerpo/Dinámica) + sparkline 60s + 8 bandas.
+ * Read-only — el Bridge empuja métricas por IPC cada ~500ms.
+ * ============================================================ */
+#metrics-strip {
+  flex-shrink: 0;
+  padding: 10px 14px 12px;
+  border-bottom: 1px solid var(--border-glass);
+  background:
+    linear-gradient(180deg, rgba(212, 175, 55, 0.04), transparent 60%),
+    rgba(5, 7, 11, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metrics-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.metric {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 6px 4px 5px;
+  text-align: center;
+  transition: border-color 200ms;
+}
+.metric:hover { border-color: var(--border-glass-hover); }
+.metric.primary {
+  background: linear-gradient(180deg, rgba(212, 175, 55, 0.10), rgba(0, 0, 0, 0.35));
+  border-color: rgba(212, 175, 55, 0.30);
+}
+
+.metric-label {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.metric-value {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+  color: var(--gold);
+  transition: color 200ms;
+}
+.metric.primary .metric-value { font-size: 20px; color: var(--gold-soft); }
+.metric-value.warn { color: var(--red); }
+.metric-value.cool { color: var(--blue); }
+.metric-value.good { color: var(--green); }
+.metric-unit {
+  font-size: 8px;
+  opacity: 0.55;
+  margin-left: 2px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.metrics-trend {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px 4px;
+}
+.trend-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2px;
+}
+.trend-label, .trend-target {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+.trend-target { color: var(--gold-dim); }
+#spark-lufs {
+  display: block;
+  width: 100%;
+  height: 26px;
+}
+
+.metrics-bands {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 26px;
+  padding: 0 2px;
+}
+.metrics-bands .band {
+  flex: 1;
+  background: linear-gradient(to top, var(--vino) 0%, var(--gold) 100%);
+  border-radius: 2px 2px 0 0;
+  min-height: 1px;
+  opacity: 0.55;
+  transition: height 180ms ease-out, opacity 180ms, filter 180ms;
+}
+.metrics-bands .band.hot {
+  filter: drop-shadow(0 0 4px var(--gold));
+  opacity: 1;
+}
+
+/* En modo COMPACT y STADIUM ya tienen reglas más abajo;
+   acá sólo ocultamos el strip si compact (en compact no cabe). */
+body[data-mode="compact"] #metrics-strip { display: none; }
 
 /* ============================================================
  * BODY: visualizer + chat

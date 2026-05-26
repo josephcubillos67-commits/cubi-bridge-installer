@@ -673,15 +673,27 @@ function closeCaptureWindow() {
 // ─── Floating HUD overlay (ventana siempre-encima) ──────────────
 // Pastor mezcla en Cubase fullscreen. Esta ventana flotante muestra LUFS, TP,
 // observaciones y plugin crítico SIN sacarlo del DAW. READ-ONLY total.
-const OVERLAY_DEFAULT = { width: 340, height: 410 };
-const OVERLAY_COMPACT = { width: 260, height: 120 };
+// Pastor 26-may-2026: HUD v2 (Jarvis) + metrics strip integrado.
+// Ancho fijo (480) — los modos compact/stadium siguen siendo opt-in.
+// Altura redimensionable: min 540 (cabe header+strip+chat mínimo),
+// max 1400 (cualquier monitor 1080p+ acepta), default 720.
+const OVERLAY_DEFAULT = { width: 480, height: 720 };
+const OVERLAY_COMPACT = { width: 320, height: 80 };
+const OVERLAY_MIN_HEIGHT = 540;
+const OVERLAY_MAX_HEIGHT = 1400;
 
 function getOverlayBounds() {
   // Restaurar posición/tamaño si el usuario los movió. Si no hay nada guardado,
   // colocar en la esquina inferior-derecha del display primario.
   const saved = store.get("overlay") || {};
   const compact = !!saved.compact;
-  const size = compact ? OVERLAY_COMPACT : OVERLAY_DEFAULT;
+  // Altura persistida (el Pastor estiró el HUD hacia abajo) — clamped a min/max.
+  const savedHeight = typeof saved.height === "number" && isFinite(saved.height)
+    ? Math.max(OVERLAY_MIN_HEIGHT, Math.min(OVERLAY_MAX_HEIGHT, saved.height))
+    : OVERLAY_DEFAULT.height;
+  const size = compact
+    ? { ...OVERLAY_COMPACT }
+    : { width: OVERLAY_DEFAULT.width, height: savedHeight };
   let { x, y } = saved;
 
   // Default: esquina inferior-derecha del display primario.
@@ -734,12 +746,21 @@ function openOverlayWindow() {
     return;
   }
   const b = getOverlayBounds();
+  // Pastor 26-may-2026: ahora redimensionable verticalmente.
+  // Ancho fijo (min===max===480) para no romper layout del Jarvis HUD.
+  // Alto entre 540 y 1400 — el Pastor estira hacia abajo para ver más chat.
+  // En compact, las restricciones se relajan (el modo lo controla CSS).
+  const isCompact = !!b.compact;
   overlayWindow = new BrowserWindow({
     x: b.x, y: b.y,
     width: b.width, height: b.height,
+    minWidth: isCompact ? OVERLAY_COMPACT.width : OVERLAY_DEFAULT.width,
+    maxWidth: isCompact ? OVERLAY_COMPACT.width : OVERLAY_DEFAULT.width,
+    minHeight: isCompact ? OVERLAY_COMPACT.height : OVERLAY_MIN_HEIGHT,
+    maxHeight: isCompact ? OVERLAY_COMPACT.height : OVERLAY_MAX_HEIGHT,
     frame: false,
     transparent: true,
-    resizable: false,
+    resizable: !isCompact,        // sólo el modo expandido se estira
     minimizable: false,
     maximizable: false,
     skipTaskbar: true,           // no contamina el alt-tab del Pastor
@@ -774,15 +795,23 @@ function openOverlayWindow() {
     if (lastPluginChain) forwardToOverlay("overlay:plugins", lastPluginChain);
   });
 
-  // Persistir posición cuando el Pastor mueve la ventana
+  // Persistir posición + altura cuando el Pastor mueve o estira el HUD.
+  // Altura se guarda sólo si NO está en compact (compact tiene tamaño fijo).
   const persist = () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) return;
     const [x, y] = overlayWindow.getPosition();
+    const [, h] = overlayWindow.getSize();
     const saved = store.get("overlay") || {};
-    store.set("overlay", { ...saved, x, y });
+    const next = { ...saved, x, y };
+    if (!saved.compact && h >= OVERLAY_MIN_HEIGHT && h <= OVERLAY_MAX_HEIGHT) {
+      next.height = h;
+    }
+    store.set("overlay", next);
   };
   overlayWindow.on("move", persist);
   overlayWindow.on("moved", persist);
+  overlayWindow.on("resize", persist);   // Pastor estira hacia abajo
+  overlayWindow.on("resized", persist);
   overlayWindow.on("closed", () => {
     overlayWindow = null;
     rebuildMenu(currentTrayState);
@@ -809,12 +838,33 @@ function toggleOverlayCompact() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   const saved = store.get("overlay") || {};
   const nextCompact = !saved.compact;
-  const size = nextCompact ? OVERLAY_COMPACT : OVERLAY_DEFAULT;
+  // Si vuelve a expandido, restaurar la altura que el Pastor había estirado.
+  const expandedHeight = typeof saved.height === "number" && isFinite(saved.height)
+    ? Math.max(OVERLAY_MIN_HEIGHT, Math.min(OVERLAY_MAX_HEIGHT, saved.height))
+    : OVERLAY_DEFAULT.height;
+  const size = nextCompact
+    ? { ...OVERLAY_COMPACT }
+    : { width: OVERLAY_DEFAULT.width, height: expandedHeight };
+
+  // CRÍTICO: actualizar min/max/resizable ANTES de setSize — si no, los límites
+  // viejos clamean el nuevo tamaño y queda atascado en el rango incorrecto.
+  if (nextCompact) {
+    overlayWindow.setResizable(false);
+    overlayWindow.setMinimumSize(OVERLAY_COMPACT.width, OVERLAY_COMPACT.height);
+    overlayWindow.setMaximumSize(OVERLAY_COMPACT.width, OVERLAY_COMPACT.height);
+  } else {
+    overlayWindow.setMinimumSize(OVERLAY_DEFAULT.width, OVERLAY_MIN_HEIGHT);
+    overlayWindow.setMaximumSize(OVERLAY_DEFAULT.width, OVERLAY_MAX_HEIGHT);
+    overlayWindow.setResizable(true);
+  }
   overlayWindow.setSize(size.width, size.height);
+
+  // HUD v2 usa body[data-mode="..."]; HUD v1 usaba body.compact. Setear ambos
+  // para que el toggle funcione en cualquier versión cargada.
   overlayWindow.webContents.executeJavaScript(
     nextCompact
-      ? 'document.body.classList.add("compact")'
-      : 'document.body.classList.remove("compact")'
+      ? 'document.body.classList.add("compact"); document.body.dataset.mode="compact";'
+      : 'document.body.classList.remove("compact"); document.body.dataset.mode="expanded";'
   ).catch(() => {});
   store.set("overlay", { ...saved, compact: nextCompact });
 }
