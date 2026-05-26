@@ -8,6 +8,17 @@ contextBridge.exposeInMainWorld("bridgeAPI", {
   // Capture window (Bridge 1 — análisis del master output)
   sendMetrics: (metrics) => ipcRenderer.send("bridge:metrics", metrics),
   reportCaptureError: (msg) => ipcRenderer.send("bridge:capture-error", msg),
+
+  // Bridge 1.8.0 — Audio clip on-demand para Gemini Audio.
+  // El server pide los últimos N segundos del master cuando el Pastor hace
+  // una pregunta musical en el HUD. La ventana de captura devuelve un
+  // WebM/Opus base64 (~120KB para 10s). Solo viaja bajo demanda — NO continuo.
+  sendAudioClip: (payload) => ipcRenderer.send("bridge:audio-clip-reply", payload),
+  onAudioClipRequest: (cb) => {
+    const handler = (_e, req) => cb(req);
+    ipcRenderer.on("bridge:request-audio-clip", handler);
+    return () => ipcRenderer.removeListener("bridge:request-audio-clip", handler);
+  },
 });
 
 // API exclusiva del Floating HUD overlay (ventana siempre-encima).

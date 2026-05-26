@@ -588,6 +588,22 @@ ipcMain.on("overlay:send-live-message", (_event, payload) => {
   }
 });
 
+// ─── Bridge 1.8.0 — Audio clip on-demand para Gemini Audio ─────────────────
+// El server pide los últimos N segundos del master por la WS cuando el
+// Pastor hace una pregunta musical/perceptual en el HUD. Acá hacemos puente:
+//   server WS → main.js → captureWindow (encode) → main.js → server WS.
+// La pregunta sigue volviendo como "live-reply" normal (con flag audioUsed).
+ipcMain.on("bridge:audio-clip-reply", (_event, payload) => {
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!payload || !payload.clipReqId) return;
+    // Forwardear tal cual al server por la WS autenticada.
+    ws.send(JSON.stringify({ type: "audio-clip-reply", ...payload }));
+  } catch (e) {
+    console.warn("[Bridge] audio-clip-reply forward falló:", e?.message || e);
+  }
+});
+
 ipcMain.on("bridge:capture-error", (_event, msg) => {
   console.warn("[Bridge] Captura falló:", msg);
   lastCaptureError = msg;
@@ -877,13 +893,38 @@ function connect() {
         // Pastor 25-may-2026 · respuesta del Live Copilot interactivo.
         // Vino por la misma WS del Bridge tras un live-message enviado
         // desde el HUD. La reenviamos al overlayWindow vía IPC.
+        // 1.8.0+: agrega flag audioUsed (true si el cerebro escuchó los
+        // últimos 10s de Cubase via Gemini Audio multimodal).
         forwardToOverlay("overlay:live-reply", {
           reqId: msg.reqId || null,
           ok: !!msg.ok,
           text: msg.text || "",
           reason: msg.reason || null,
+          audioUsed: !!msg.audioUsed,
           ts: msg.ts || Date.now(),
         });
+      } else if (msg.type === "audio-clip-request" && msg.clipReqId) {
+        // 1.8.0 — el server pide los últimos N segundos del master para
+        // mandárselos a Gemini Audio. Reenviamos a la ventana de captura
+        // (la única que tiene el MediaRecorder con el buffer circular).
+        try {
+          if (captureWindow && !captureWindow.isDestroyed()) {
+            captureWindow.webContents.send("bridge:request-audio-clip", {
+              clipReqId: String(msg.clipReqId),
+              durationSec: typeof msg.durationSec === "number" ? msg.durationSec : 10,
+            });
+          } else {
+            // Captura cerrada → respondemos no-buffer al server para que no espere
+            ws.send(JSON.stringify({
+              type: "audio-clip-reply",
+              clipReqId: String(msg.clipReqId),
+              ok: false,
+              reason: "capture-window-closed",
+            }));
+          }
+        } catch (e) {
+          console.warn("[Bridge] audio-clip-request handler:", e?.message || e);
+        }
       }
     } catch {}
   });

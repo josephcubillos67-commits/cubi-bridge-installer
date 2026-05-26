@@ -277,11 +277,92 @@
           window.bridgeAPI.sendMetrics(metrics);
         }, TICK_MS);
 
+        // ────────────────────────────────────────────────────────────────
+        // BRIDGE 1.8.0 — Buffer circular de audio para Gemini Audio on-demand
+        // ────────────────────────────────────────────────────────────────
+        // MediaRecorder paralelo al analyser, graba chunks de 1s del MediaStream
+        // ORIGINAL (sin K-weighting — queremos audio crudo que escuche Gemini igual
+        // que el Pastor). Mantenemos solo los últimos ~17s en RAM (~200KB total).
+        //
+        // Cuando el server pide clip via IPC, encodeamos los últimos N segundos
+        // como base64 y devolvemos. Cero envío continuo — solo bajo demanda.
+        // ────────────────────────────────────────────────────────────────
+        const AUDIO_BUFFER_SEC = 17;
+        const AUDIO_CHUNK_MS = 1000;
+        const audioChunks = []; // [{blob, ts}]
+        let recorder = null;
+        try {
+          const recordStream = new MediaStream(audioTracks);
+          recorder = new MediaRecorder(recordStream, {
+            mimeType: "audio/webm;codecs=opus",
+            audioBitsPerSecond: 96000,
+          });
+          recorder.ondataavailable = (e) => {
+            if (!e.data || e.data.size === 0) return;
+            audioChunks.push({ blob: e.data, ts: Date.now() });
+            const cutoff = Date.now() - AUDIO_BUFFER_SEC * 1000;
+            while (audioChunks.length > 1 && audioChunks[0].ts < cutoff) {
+              audioChunks.shift();
+            }
+          };
+          recorder.start(AUDIO_CHUNK_MS);
+          log("Buffer audio on-demand activo (" + AUDIO_BUFFER_SEC + "s, Opus 96kbps).");
+        } catch (e) {
+          log("WARN: MediaRecorder no disponible (Gemini Audio off): " + e.message);
+        }
+
+        window.bridgeAPI.onAudioClipRequest(async (req) => {
+          const reqId = req && req.clipReqId;
+          const durationSec = Math.min(15, Math.max(3, (req && req.durationSec) || 10));
+          if (!reqId) return;
+          if (!recorder || audioChunks.length === 0) {
+            window.bridgeAPI.sendAudioClip({ clipReqId: reqId, ok: false, reason: "no-buffer" });
+            return;
+          }
+          try {
+            // Forzar flush del chunk en curso para incluir audio MUY fresco
+            try { recorder.requestData(); } catch {}
+            await new Promise((r) => setTimeout(r, 120));
+            const cutoff = Date.now() - durationSec * 1000;
+            const recent = audioChunks.filter((c) => c.ts >= cutoff);
+            if (recent.length === 0) {
+              window.bridgeAPI.sendAudioClip({ clipReqId: reqId, ok: false, reason: "no-recent" });
+              return;
+            }
+            const blob = new Blob(recent.map((c) => c.blob), { type: "audio/webm" });
+            const buf = await blob.arrayBuffer();
+            // base64 robusto (chunks de 32KB para no romper la stack)
+            const bytes = new Uint8Array(buf);
+            let bin = "";
+            const CHUNK = 0x8000;
+            for (let i = 0; i < bytes.length; i += CHUNK) {
+              bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+            }
+            const base64 = btoa(bin);
+            window.bridgeAPI.sendAudioClip({
+              clipReqId: reqId,
+              ok: true,
+              base64,
+              mimeType: "audio/webm",
+              durationSec,
+              sizeBytes: buf.byteLength,
+            });
+          } catch (err) {
+            log("Error armando clip: " + (err && err.message || err));
+            window.bridgeAPI.sendAudioClip({
+              clipReqId: reqId,
+              ok: false,
+              reason: (err && err.message) || "encode-error",
+            });
+          }
+        });
+
         // Si el sistema termina la captura (usuario la corta desde el panel
         // de Windows, Cubase cambia de device, etc.) avisamos para que main.js
         // reintente automáticamente.
         audioTracks[0].addEventListener("ended", () => {
           clearInterval(interval);
+          try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch {}
           log("Stream del sistema terminado — main.js reintentará.");
           window.bridgeAPI.reportCaptureError("stream-ended");
         });
