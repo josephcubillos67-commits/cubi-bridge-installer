@@ -66,6 +66,10 @@ contextBridge.exposeInMainWorld("overlayAPI", {
           ok: !!payload.ok,
           text: String(payload.text || ""),
           reason: payload.reason || null,
+          // 1.8.0 — propagar flag de Gemini Audio multimodal hasta el HUD
+          // (app.js lo usa para mostrar marcador 🎧 cuando el cerebro
+          // realmente escuchó los últimos ~10s del master).
+          audioUsed: !!payload.audioUsed,
         });
       };
       const timer = setTimeout(() => {
