@@ -124,6 +124,23 @@ function renderMessage({ role, text, actions = [] }) {
   const bubble = document.createElement("div");
   bubble.className = "msg-bubble";
   bubble.textContent = text;
+
+  // Botón × para borrar este mensaje. Aparece al pasar el mouse por encima.
+  // Pastor 26-may-2026: cuando el copiloto se vuelve charlatán o repite,
+  // el Pastor barre el chat sin tener que limpiarlo entero.
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "msg-close";
+  closeBtn.type = "button";
+  closeBtn.title = "Borrar este mensaje";
+  closeBtn.setAttribute("aria-label", "Borrar mensaje");
+  closeBtn.textContent = "×";
+  closeBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    msg.classList.add("removing");
+    setTimeout(() => msg.remove(), 220);
+  });
+  bubble.appendChild(closeBtn);
+
   content.appendChild(bubble);
 
   if (actions.length > 0) {
@@ -460,10 +477,31 @@ window.addEventListener("resize", () => {
 const microFeedback = {
   lastEmitAt: 0,
   MIN_INTERVAL_MS: 6_000,
-  recentCodes: new Map(), // code -> timestamp
+  recentCodes: new Map(),  // code -> timestamp
+  recentTexts: new Map(),  // texto normalizado -> timestamp
+  // Pastor 26-may-2026: el dedup por code (30s) no alcanzaba porque el
+  // Observation Engine emite el mismo síntoma con codes distintos cuando
+  // cambia ligeramente el contexto (ej: "loudness_low" vs "loudness_low_streaming").
+  // Resultado: el copiloto repetía "la mezcla suena chica" cada 30s.
+  // Solución: dedup por texto normalizado con ventana de 5 minutos.
   DEDUP_WINDOW_MS: 30_000,
+  TEXT_DEDUP_WINDOW_MS: 5 * 60_000,
   SEVERITY_ICON: { critical: "⚠️", warn: "•", info: "·", good: "✨" },
 };
+
+// Normaliza un texto para comparar: lowercase, sin tildes, sin números,
+// sin signos, colapsando espacios. Así "−19.7 LUFS" y "−18.2 LUFS"
+// caen al mismo bucket si el resto de la oración es igual.
+function normalizeObsText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[-+]?\d+([.,]\d+)?/g, "#")
+    .replace(/[^\p{L}\s#]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
 
 function pushObservationToChat(obs) {
   if (!obs || !obs.code || !obs.text) return;
@@ -473,15 +511,30 @@ function pushObservationToChat(obs) {
   const now = Date.now();
   const lastCode = microFeedback.recentCodes.get(obs.code) ?? 0;
   if (now - lastCode < microFeedback.DEDUP_WINDOW_MS) return;
+
+  // Dedup por texto normalizado (5 min) — evita que el copiloto repita
+  // la misma observación con codes ligeramente distintos.
+  const normText = normalizeObsText(obs.text);
+  if (normText) {
+    const lastText = microFeedback.recentTexts.get(normText) ?? 0;
+    if (now - lastText < microFeedback.TEXT_DEDUP_WINDOW_MS) return;
+    microFeedback.recentTexts.set(normText, now);
+  }
+
   if (now - microFeedback.lastEmitAt < microFeedback.MIN_INTERVAL_MS) return;
 
   microFeedback.recentCodes.set(obs.code, now);
   microFeedback.lastEmitAt = now;
 
-  // Limpieza periódica del dedup map
+  // Limpieza periódica de ambos dedup maps
   if (microFeedback.recentCodes.size > 30) {
     for (const [k, ts] of microFeedback.recentCodes) {
       if (now - ts > microFeedback.DEDUP_WINDOW_MS * 2) microFeedback.recentCodes.delete(k);
+    }
+  }
+  if (microFeedback.recentTexts.size > 40) {
+    for (const [k, ts] of microFeedback.recentTexts) {
+      if (now - ts > microFeedback.TEXT_DEDUP_WINDOW_MS * 2) microFeedback.recentTexts.delete(k);
     }
   }
 

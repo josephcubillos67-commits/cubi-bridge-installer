@@ -1,6 +1,6 @@
 {
   "name": "cubi-bridge",
-  "version": "1.8.3",
+  "version": "1.8.4",
   "description": "CUBI Bridge — Observador READ-ONLY del estudio del Pastor Jose Cubillos. Conecta Cubase con el Coproductor IA en apocalipsisconcafe.com.",
   "main": "main.js",
   "author": {

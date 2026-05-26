@@ -666,11 +666,54 @@ body[data-state="processing"] .viz-processing {
 }
 
 .msg-bubble {
+  position: relative;
   padding: 10px 14px;
   border-radius: var(--radius-md);
   font-size: 13.5px;
   line-height: 1.55;
   word-wrap: break-word;
+}
+
+/* Botón × para borrar un mensaje individual.
+   Pastor 26-may-2026: aparece en hover (no permanente para no ensuciar el chat).
+   Click → fade-out 220ms + remove del DOM. ADN CUBI: cero modal, cero confirmación. */
+.msg-close {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(10, 14, 20, 0.92);
+  border: 1px solid var(--border-glass);
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 160ms ease, transform 160ms ease, color 160ms, border-color 160ms;
+  z-index: 2;
+}
+.msg-bubble:hover .msg-close,
+.msg-close:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+.msg-close:hover {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.6);
+  color: var(--red);
+}
+.msg.removing {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.96);
+  transition: opacity 220ms ease, transform 220ms ease;
+  pointer-events: none;
 }
 .msg.user .msg-bubble {
   background: rgba(107, 15, 26, 0.55);
