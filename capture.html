@@ -275,6 +275,24 @@
             timestamp: Date.now(),
           };
           window.bridgeAPI.sendMetrics(metrics);
+
+          // BRIDGE 1.9.1 — Alimentar music-analyzer INLINE (no wrap).
+          // contextBridge congela window.bridgeAPI → reasignar sendMetrics tira
+          // TypeError silencioso que mataba el script entero. Fix surgical:
+          // hacer el trabajo del envelope/crescendo acá mismo, con el metrics
+          // que ya tenemos a mano.
+          try {
+            const nowPerf = performance.now();
+            const tickDurSec = Math.max(0.05, (nowPerf - lastEnvIngestTs) / 1000);
+            lastEnvIngestTs = nowPerf;
+            ingestEnvelope(tickDurSec);
+            if (metrics.lufs != null && isFinite(metrics.lufs)) {
+              const nowTs = Date.now();
+              lufsCrescRing.push({ ts: nowTs, lufs: metrics.lufs });
+              const cutoff = nowTs - LUFS_CRESC_WINDOW_MS;
+              while (lufsCrescRing.length > 1 && lufsCrescRing[0].ts < cutoff) lufsCrescRing.shift();
+            }
+          } catch (e) { /* silencioso — nunca romper el tick principal */ }
         }, TICK_MS);
 
         // ════════════════════════════════════════════════════════════════
@@ -508,27 +526,11 @@
           return "Denso";
         }
 
-        // Hook al setInterval principal: actualiza envelope ring cada tick
-        // y crescendo ring (usamos LUFS short-term que ya se calcula arriba).
-        // Pasamos el tickDurSec REAL (varía con jitter del scheduler) al ingest
-        // para que el envelope mantenga continuidad sin huecos ni solapamiento.
-        const _origSendMetrics = window.bridgeAPI.sendMetrics;
+        // BRIDGE 1.9.1 — el feed del envelope/crescendo se hace INLINE en el
+        // setInterval principal (arriba, justo después de sendMetrics). NO
+        // reasignar window.bridgeAPI.sendMetrics porque contextBridge lo deja
+        // frozen y el TypeError mataba todo el bloque <script> desde acá.
         let lastEnvIngestTs = performance.now();
-        window.bridgeAPI.sendMetrics = function(metrics) {
-          _origSendMetrics(metrics);
-          try {
-            const nowPerf = performance.now();
-            const tickDurSec = Math.max(0.05, (nowPerf - lastEnvIngestTs) / 1000);
-            lastEnvIngestTs = nowPerf;
-            ingestEnvelope(tickDurSec);
-            if (metrics && metrics.lufs != null && isFinite(metrics.lufs)) {
-              const nowTs = Date.now();
-              lufsCrescRing.push({ ts: nowTs, lufs: metrics.lufs });
-              const cutoff = nowTs - LUFS_CRESC_WINDOW_MS;
-              while (lufsCrescRing.length > 1 && lufsCrescRing[0].ts < cutoff) lufsCrescRing.shift();
-            }
-          } catch (e) { /* silencioso — no romper el tick principal */ }
-        };
 
         // Tick musical cada 2s: BPM, KEY, etiquetas → IPC
         setInterval(() => {

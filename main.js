@@ -1397,6 +1397,15 @@ app.whenReady().then(() => {
     openPairingWindow();
   } else if (store.get("token")) {
     connect();
+    // BRIDGE 1.9.1 — Auto-abrir HUD flotante cuando arrancamos NORMAL
+    // (no oculto desde el login item). Esto cubre el caso post-instalador:
+    // NSIS termina con runAfterFinish:true → el Bridge arranca SIN --hidden
+    // → el Pastor ve el HUD aparecer solo, no queda "perdido en el tray".
+    // Si arrancó con --hidden (boot del PC), respetamos y dejamos el tray frío
+    // hasta que el Pastor haga click derecho → Mostrar HUD.
+    if (!launchedHidden) {
+      setTimeout(() => openOverlayWindow(), 800);
+    }
   }
 
   // Auto-updater desactivado en v1.4.0 (Install Kit v3 — sin GitHub Releases).
