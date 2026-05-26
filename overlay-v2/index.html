@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>CUBI Copilot — Jarvis HUD v2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-mode="expanded" data-state="idle" data-clickthrough="off" data-dock="none">
+
+  <!-- Fondo cinematográfico: capa de glassmorphism + gradiente vino→oro -->
+  <div id="glass-bg">
+    <div class="glow glow-wine"></div>
+    <div class="glow glow-gold"></div>
+    <div class="noise"></div>
+  </div>
+
+  <!-- Marco principal del HUD -->
+  <div id="hud">
+
+    <!-- HEADER: drag handle + identidad + controles -->
+    <header id="hud-header">
+      <div class="identity">
+        <div class="avatar" aria-hidden="true">
+          <div class="avatar-core"></div>
+          <div class="avatar-ring"></div>
+        </div>
+        <div class="identity-text">
+          <div class="name">CUBI Copilot</div>
+          <div class="status-label" id="status-label">En reposo</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="ctrl-btn" id="btn-clickthrough" title="Click-through (mouse atraviesa al DAW)" aria-label="Toggle click-through">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>
+        </button>
+        <button class="ctrl-btn" id="btn-mode" title="Cambiar tamaño: compacto / expandido / proyector" aria-label="Cambiar modo de tamaño">
+          <svg viewBox="0 0 16 16"><path d="M2 2 h5 v1 h-4 v4 h-1 z M14 2 v5 h-1 v-4 h-4 v-1 z M14 14 h-5 v-1 h4 v-4 h1 z M2 14 v-5 h1 v4 h4 v1 z" fill="currentColor"/></svg>
+        </button>
+        <button class="ctrl-btn" id="btn-dock" title="Acoplar al borde de la pantalla" aria-label="Acoplar lateral">
+          <svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" fill="currentColor" opacity="0.6"/><rect x="8" y="2" width="6" height="12" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+        <button class="ctrl-btn" id="btn-settings" title="Ajustes (transparencia, posición)" aria-label="Ajustes">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1 v2 M8 13 v2 M1 8 h2 M13 8 h2 M3 3 l1.5 1.5 M11.5 11.5 l1.5 1.5 M3 13 l1.5 -1.5 M11.5 4.5 l1.5 -1.5" stroke="currentColor" stroke-width="1.5"/></svg>
+        </button>
+        <button class="ctrl-btn close" id="btn-close" title="Ocultar (vuelve al tray)" aria-label="Cerrar">
+          <svg viewBox="0 0 16 16"><path d="M3 3 L13 13 M13 3 L3 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- BODY: visualizer + chat -->
+    <main id="hud-body">
+
+      <!-- Panel de visualización del estado actual -->
+      <section id="visualizer" aria-label="Estado del copiloto">
+        <!-- IDLE: respiración vino→oro -->
+        <div class="viz viz-idle" data-state="idle">
+          <div class="idle-orb"></div>
+        </div>
+        <!-- LISTENING: ondas concéntricas verdes -->
+        <div class="viz viz-listening" data-state="listening">
+          <div class="ripple"></div>
+          <div class="ripple"></div>
+          <div class="ripple"></div>
+          <div class="mic-icon">🎤</div>
+        </div>
+        <!-- THINKING: 3 puntos dorados -->
+        <div class="viz viz-thinking" data-state="thinking">
+          <div class="dot"></div>
+          <div class="dot"></div>
+          <div class="dot"></div>
+        </div>
+        <!-- ANALYZING: 8 barras EQ -->
+        <div class="viz viz-analyzing" data-state="analyzing">
+          <div class="bars">
+            <span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span>
+          </div>
+        </div>
+        <!-- SPEAKING: waveform horizontal -->
+        <div class="viz viz-speaking" data-state="speaking">
+          <svg class="waveform" viewBox="0 0 100 30" preserveAspectRatio="none">
+            <path d="M0 15 Q5 5 10 15 T20 15 T30 15 T40 15 T50 15 T60 15 T70 15 T80 15 T90 15 T100 15" />
+          </svg>
+        </div>
+        <!-- ERROR: pulse rojo -->
+        <div class="viz viz-error" data-state="error">
+          <div class="error-icon">⚠</div>
+          <div class="error-pulse"></div>
+        </div>
+        <!-- PROCESSING: 4 capas rotando (drums/bass/vox/other) -->
+        <div class="viz viz-processing" data-state="processing">
+          <div class="layer layer-drums"></div>
+          <div class="layer layer-bass"></div>
+          <div class="layer layer-vox"></div>
+          <div class="layer layer-other"></div>
+          <div class="processing-label">Separando stems</div>
+        </div>
+      </section>
+
+      <!-- Conversación con el copiloto -->
+      <section id="chat" aria-label="Conversación con CUBI Copilot">
+        <div class="chat-divider"><span>Conversación</span></div>
+        <div id="chat-log" role="log" aria-live="polite">
+          <!-- Mensajes se inyectan acá -->
+        </div>
+      </section>
+
+    </main>
+
+    <!-- INPUT: chat textual + futuro micrófono -->
+    <footer id="hud-input">
+      <button class="input-btn mic" id="btn-mic" title="Voz (próxima fase)" aria-label="Activar voz" disabled>
+        <svg viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="8" rx="2" fill="currentColor"/><path d="M3 8 a5 5 0 0 0 10 0 M8 13 v2" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      </button>
+      <textarea
+        id="chat-input"
+        placeholder="Escribí algo al copiloto..."
+        rows="1"
+        autocomplete="off"
+        autocapitalize="sentences"
+      ></textarea>
+      <button class="input-btn send" id="btn-send" title="Enviar (Enter)" aria-label="Enviar mensaje">
+        <svg viewBox="0 0 16 16"><path d="M2 8 L14 2 L11 8 L14 14 Z" fill="currentColor"/></svg>
+      </button>
+    </footer>
+
+    <!-- Panel de ajustes (oculto por default, se abre con btn-settings) -->
+    <aside id="settings-panel" aria-hidden="true">
+      <div class="settings-row">
+        <label>Transparencia</label>
+        <input type="range" id="opacity-slider" min="30" max="100" value="92" />
+        <span class="value" id="opacity-value">92%</span>
+      </div>
+      <div class="settings-row">
+        <label>Always on top</label>
+        <span class="badge badge-on">SIEMPRE</span>
+      </div>
+      <div class="settings-row">
+        <label>Click-through</label>
+        <button class="toggle" id="settings-clickthrough">OFF</button>
+      </div>
+      <div class="settings-hint">
+        Estos ajustes se aplican localmente. La capa Electron (siempre encima, click-through real) se activa al instalar el Bridge.
+      </div>
+    </aside>
+
+  </div>
+
+  <script type="module" src="messaging.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
