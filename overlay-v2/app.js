@@ -111,9 +111,15 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-function renderMessage({ role, text, actions = [] }) {
+function renderMessage({ role, text, actions = [], severity = null }) {
   const msg = document.createElement("div");
   msg.className = `msg ${role}`;
+  // Pastor 26-may-2026: severidad visual diferenciada.
+  // critical → rojo (urgente, hay que actuar); warn → ámbar (atención);
+  // info/good/null → estilo normal.
+  if (severity === "critical") msg.classList.add("severity-critical");
+  else if (severity === "warn") msg.classList.add("severity-warn");
+  else if (severity === "good") msg.classList.add("severity-good");
 
   const avatar = document.createElement("div");
   avatar.className = "msg-avatar";
@@ -540,7 +546,11 @@ function pushObservationToChat(obs) {
 
   const icon = microFeedback.SEVERITY_ICON[obs.severity] || "•";
   setVisual("analyzing", { autoRevert: 2200 });
-  renderMessage({ role: "assistant", text: `${icon} ${obs.text}` });
+  renderMessage({
+    role: "assistant",
+    text: `${icon} ${obs.text}`,
+    severity: obs.severity,
+  });
 }
 
 /* ============================================================
