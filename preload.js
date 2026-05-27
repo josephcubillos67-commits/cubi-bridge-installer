@@ -9,6 +9,12 @@ contextBridge.exposeInMainWorld("bridgeAPI", {
   sendMetrics: (metrics) => ipcRenderer.send("bridge:metrics", metrics),
   reportCaptureError: (msg) => ipcRenderer.send("bridge:capture-error", msg),
 
+  // Bridge 1.10.0 — Audio device picker
+  // getAudioConfig: lee {deviceId,label} persistidos en electron-store
+  // reportAudioInputs: publica enumerateDevices() al main para poblar tray submenu
+  getAudioConfig: () => ipcRenderer.invoke("bridge:get-audio-config"),
+  reportAudioInputs: (list) => ipcRenderer.send("bridge:audio-inputs", list),
+
   // Bridge 1.9.0 — Perfil musical en vivo (BPM/key/tempo/groove/energy/dinámica/crescendo)
   // Calculado 100% local en capture.html. Refresh cada 2s. Cero coste IA.
   sendMusicProfile: (profile) => ipcRenderer.send("bridge:music-profile", profile),

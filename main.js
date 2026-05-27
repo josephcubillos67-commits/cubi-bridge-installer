@@ -206,6 +206,10 @@ function makeTrayIcon(color) {
 
 let currentTrayState = "disconnected";
 
+// Bridge 1.10.0 — audio inputs reportados por capture.html (post-permiso).
+// El submenu "🎤 Fuente de audio" se construye desde este cache.
+let cachedAudioInputs = [];
+
 function updateTrayState(state /* "connected" | "disconnected" | "paused" | "pairing" */) {
   if (!tray) return;
   const prevState = currentTrayState;
@@ -286,6 +290,37 @@ function rebuildMenu(state) {
     );
   }
   const autoLaunchEnabled = !!app.getLoginItemSettings().openAtLogin;
+
+  // Bridge 1.10.0 — submenu de fuente de audio. Lista poblada por capture.html
+  // tras pedir permiso (labels llegan post-getUserMedia). "Default" mantiene el
+  // comportamiento pre-1.10 (WASAPI loopback del default playback de Windows).
+  const currentAudioId = store.get("audioInputDeviceId") || null;
+  const audioInputsSubmenu = [
+    {
+      label: "🔁 Default del sistema (WASAPI loopback)",
+      type: "radio",
+      checked: !currentAudioId,
+      click: () => selectAudioInput(null, null),
+    },
+    { type: "separator" },
+  ];
+  if (cachedAudioInputs.length === 0) {
+    audioInputsSubmenu.push({
+      label: "(Enumerando devices… reabre el menú en 3s)",
+      enabled: false,
+    });
+  } else {
+    for (const d of cachedAudioInputs) {
+      const lbl = (d.label || d.deviceId || "device sin nombre").slice(0, 70);
+      audioInputsSubmenu.push({
+        label: lbl,
+        type: "radio",
+        checked: currentAudioId === d.deviceId,
+        click: () => selectAudioInput(d.deviceId, d.label),
+      });
+    }
+  }
+
   const menu = Menu.buildFromTemplate([
     ...menuItems,
     {
@@ -310,6 +345,11 @@ function rebuildMenu(state) {
       label: isPaused ? "▶ Reanudar observación" : "⏸ Pausar observación",
       enabled: hasToken,
       click: () => togglePause(),
+    },
+    {
+      label: "🎤 Fuente de audio",
+      enabled: hasToken,
+      submenu: audioInputsSubmenu,
     },
     {
       label: "Desvincular este equipo",
@@ -663,6 +703,46 @@ ipcMain.on("bridge:capture-error", (_event, msg) => {
   }
 });
 
+// ─── Bridge 1.10.0 — Audio input device picker ─────────────────
+// Permite elegir un device específico (Voicemeeter Output VAIO/AUX, focusrite
+// input loop, etc.) cuando la cadena DAW→speakers bypassea el Windows audio
+// engine y el default loopback queda en silencio (-106 LUFS / "EN REPOSO").
+// Persistencia en electron-store; al cambiar, reciclamos la captura.
+ipcMain.handle("bridge:get-audio-config", () => ({
+  deviceId: store.get("audioInputDeviceId") || null,
+  label: store.get("audioInputLabel") || null,
+}));
+
+ipcMain.on("bridge:audio-inputs", (_e, list) => {
+  if (!Array.isArray(list)) return;
+  cachedAudioInputs = list
+    .filter((d) => d && d.deviceId && d.kind === "audioinput")
+    .map((d) => ({
+      deviceId: d.deviceId,
+      label: d.label || "",
+      groupId: d.groupId || "",
+      kind: d.kind,
+    }));
+  try { rebuildMenu(currentTrayState); } catch (e) { console.warn("[Bridge] rebuildMenu post-inputs falló:", e.message); }
+});
+
+function selectAudioInput(deviceId, label) {
+  if (deviceId) {
+    store.set("audioInputDeviceId", deviceId);
+    store.set("audioInputLabel", label || deviceId);
+    console.log("[Bridge] Audio source → " + (label || deviceId));
+  } else {
+    store.delete("audioInputDeviceId");
+    store.delete("audioInputLabel");
+    console.log("[Bridge] Audio source → default WASAPI loopback");
+  }
+  // Reciclar la captura para que tome el nuevo device.
+  // capture.html releerá la config al cargar vía bridge:get-audio-config.
+  closeCaptureWindow();
+  setTimeout(() => { try { openCaptureWindow(); } catch (e) { console.warn("[Bridge] openCaptureWindow tras switch falló:", e.message); } }, 400);
+  try { rebuildMenu(currentTrayState); } catch {}
+}
+
 // ─── Ventana oculta de captura (Bridge 1) ───────────────────────
 function openCaptureWindow() {
   if (captureWindow) return;
@@ -678,12 +758,27 @@ function openCaptureWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // Bridge 1.10.0 — partition dedicada. Los handlers de permisos/display
+      // (auto-aprobación de "media" + loopback de escritorio) viven SOLO en
+      // esta session — no se aplican a pairingWindow ni a overlayWindow, que
+      // siguen usando defaultSession con el prompt nativo de Electron.
+      partition: "persist:cubi-capture",
     },
   });
 
+  const captureSession = captureWindow.webContents.session;
+
+  // Bridge 1.10.0 — auto-aceptar permiso "media" SÓLO en la session de captura
+  // (necesario para getUserMedia con deviceId específico). Cualquier otro
+  // permiso se rechaza por defensa en profundidad.
+  captureSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === "media");
+  });
+
   // Auto-aceptar la petición de captura del escritorio (sin diálogo de Windows
-  // ni picker de Chromium — el usuario ya dio consentimiento al instalar el bridge)
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+  // ni picker de Chromium — el usuario ya dio consentimiento al instalar el
+  // bridge). Aislado a la session de captura, no afecta al resto del Bridge.
+  captureSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer.getSources({ types: ["screen"] }).then((sources) => {
       // Tomamos la pantalla principal; el audio que viaja con ella es el de TODO el sistema
       callback({ video: sources[0], audio: "loopback" });

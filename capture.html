@@ -117,20 +117,70 @@
       return peak;
     }
 
+    // Bridge 1.10.0 — captura desde un device específico (Voicemeeter Output
+    // VAIO/AUX, B1/B2, loop físico, etc.) si el Pastor lo eligió desde el tray
+    // menu. Sin elección guardada → WASAPI loopback del default de Windows
+    // (comportamiento pre-1.10, compat total).
+    async function getStream() {
+      let cfg = null;
+      try { cfg = await window.bridgeAPI.getAudioConfig(); } catch {}
+      if (cfg && cfg.deviceId) {
+        log("Captura desde device elegido: " + (cfg.label || cfg.deviceId));
+        try {
+          // No forzamos sampleRate/channelCount — algunos devices (Focusrite
+          // 44.1k locked, mono-mic) tirarían OverconstrainedError sin razón.
+          // El audio se resamplea automáticamente al sampleRate del AudioContext.
+          return await navigator.mediaDevices.getUserMedia({
+            audio: {
+              deviceId: { exact: cfg.deviceId },
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+          });
+        } catch (e) {
+          // Device desconectado / nombre cambiado: fallback a loopback y log.
+          // NO limpiamos el store — Pastor decide reelegir desde el tray.
+          log("Device '" + (cfg.label || cfg.deviceId) + "' no disponible (" + e.name + "). Volviendo a loopback.");
+        }
+      } else {
+        log("Captura desde default del sistema (WASAPI loopback)");
+      }
+      return await navigator.mediaDevices.getDisplayMedia({
+        video: { width: 1, height: 1, frameRate: 1 },
+        audio: true,
+      });
+    }
+
+    // Publicar la lista de audio inputs al main process para poblar el submenu
+    // "🎤 Fuente de audio". Los labels sólo son visibles tras obtener permiso
+    // de algún device de audio — por eso lo llamamos POST-captura, no antes.
+    async function publishAudioInputs() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const list = devices
+          .filter((d) => d.kind === "audioinput")
+          .map((d) => ({ deviceId: d.deviceId, label: d.label, groupId: d.groupId, kind: d.kind }));
+        window.bridgeAPI.reportAudioInputs(list);
+        log("Inputs publicados al tray: " + list.length);
+      } catch (e) {
+        log("enumerateDevices error: " + e.message);
+      }
+    }
+
     async function start() {
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { width: 1, height: 1, frameRate: 1 },
-          audio: true,
-        });
+        const stream = await getStream();
 
         const audioTracks = stream.getAudioTracks();
         if (audioTracks.length === 0) {
-          window.bridgeAPI.reportCaptureError("No se obtuvo audio. ¿Activaste 'Compartir audio del sistema'?");
+          window.bridgeAPI.reportCaptureError("No se obtuvo audio. Abre el tray del Bridge y elige una fuente desde '🎤 Fuente de audio'.");
           return;
         }
-        log("Audio del sistema capturado: " + audioTracks[0].label);
+        log("Audio capturado: " + audioTracks[0].label);
         stream.getVideoTracks().forEach((t) => t.stop());
+        // Poblar tray menu con la lista real de devices (ahora que hay permiso)
+        publishAudioInputs();
 
         const audioCtx = new AudioContext();
         const sampleRate = audioCtx.sampleRate;
