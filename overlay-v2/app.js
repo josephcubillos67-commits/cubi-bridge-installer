@@ -371,6 +371,22 @@ document.addEventListener("click", (e) => {
 });
 
 $("#btn-settings").addEventListener("click", toggleSettings);
+
+// Pastor 27-may-2026 — minimizar real: `hide()` del lado de Electron.
+// Mantiene la BrowserWindow viva → preserva DOM, historial del chat,
+// scroll, state visual. Al reabrirlo desde el tray (toggleOverlay) el
+// openOverlayWindow detecta la window existente y llama .show() en vez
+// de crear una nueva. ADN CUBI: un icono inline, cero modal.
+$("#btn-minimize").addEventListener("click", () => {
+  if (typeof window.overlayAPI?.minimize === "function") {
+    window.overlayAPI.minimize();
+    return;
+  }
+  // Preview web: feedback visible.
+  $("#hud").style.opacity = "0";
+  setTimeout(() => { $("#hud").style.opacity = state.opacity; }, 240);
+});
+
 $("#btn-close").addEventListener("click", () => {
   // En Electron real (HUD desktop): cerrar la ventana flotante via IPC.
   // En preview web: animación de fade-out + mensaje.

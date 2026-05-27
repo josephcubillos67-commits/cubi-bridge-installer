@@ -630,6 +630,17 @@ ipcMain.on("overlay:close", () => {
   closeOverlayWindow();
   rebuildMenu(currentTrayState);
 });
+// Pastor 27-may-2026 — minimizar real del HUD flotante.
+// hide() conserva DOM/historial/scroll. Reabrir desde el tray reutiliza
+// esta misma window (openOverlayWindow ya hace .show() si existe).
+// Diferencia con overlay:close: close DESTRUYE la ventana y borra el chat
+// de la sesión; minimize sólo la oculta.
+ipcMain.on("overlay:minimize", () => {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    try { overlayWindow.hide(); } catch {}
+    rebuildMenu(currentTrayState);
+  }
+});
 ipcMain.on("overlay:toggle-compact", () => {
   toggleOverlayCompact();
 });

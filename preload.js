@@ -34,6 +34,10 @@ contextBridge.exposeInMainWorld("bridgeAPI", {
 // API exclusiva del Floating HUD overlay (ventana siempre-encima).
 // READ-ONLY: la ventana sólo recibe y muestra; no manda datos al DAW ni al servidor.
 contextBridge.exposeInMainWorld("overlayAPI", {
+  // Pastor 27-may-2026 — minimizar real (hide sin destruir).
+  // El main hace overlayWindow.hide() y al reabrir desde el tray
+  // se reutiliza la misma window → chat e historial sobreviven.
+  minimize: () => ipcRenderer.send("overlay:minimize"),
   // Suscripciones (cada una devuelve un unsubscribe).
   onMetrics: (cb) => {
     const handler = (_e, m) => cb(m);
