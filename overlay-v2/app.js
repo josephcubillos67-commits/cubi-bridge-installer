@@ -410,6 +410,38 @@ chatInput.addEventListener("keydown", (e) => {
   }
 });
 
+// Pastor 27-may-2026 — Tercera capa de defensa para pegar desde ChatGPT/
+// navegador. Si por alguna razón ni el menú de Electron ni el
+// before-input-event capturan Ctrl+V, este handler local lee el clipboard
+// vía navigator.clipboard (Electron lo expone) e inserta en el textarea
+// en la posición del cursor. Cero opciones, cero modal — pegás y listo.
+chatInput.addEventListener("paste", async (e) => {
+  // Si el evento ya trae datos (caso normal en Electron con editMenu activo),
+  // dejamos que el navegador haga lo suyo — solo aseguramos auto-resize.
+  if (e.clipboardData && e.clipboardData.getData("text")) {
+    setTimeout(() => {
+      chatInput.style.height = "auto";
+      chatInput.style.height = Math.min(chatInput.scrollHeight, 110) + "px";
+    }, 0);
+    return;
+  }
+  // Sino, fallback manual via navigator.clipboard.
+  try {
+    e.preventDefault();
+    const text = await navigator.clipboard.readText();
+    if (!text) return;
+    const start = chatInput.selectionStart ?? chatInput.value.length;
+    const end = chatInput.selectionEnd ?? chatInput.value.length;
+    chatInput.value = chatInput.value.slice(0, start) + text + chatInput.value.slice(end);
+    const cursor = start + text.length;
+    chatInput.setSelectionRange(cursor, cursor);
+    chatInput.style.height = "auto";
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 110) + "px";
+  } catch (err) {
+    console.warn("[chat] paste fallback falló:", err?.message || err);
+  }
+});
+
 // Cerrar settings al click fuera
 document.addEventListener("click", (e) => {
   if (

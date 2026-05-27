@@ -940,6 +940,26 @@ function openOverlayWindow() {
   // "floating" → encima incluso de apps fullscreen como Cubase
   overlayWindow.setAlwaysOnTop(true, "floating");
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // Pastor 27-may-2026 — Cinturón y tirantes para pegar (Ctrl+V) desde
+  // apps externas (ChatGPT, navegador). Aunque setApplicationMenu con
+  // editMenu role ya registra los accelerators, en Electron con frame:false
+  // a veces el menú no captura. Acá interceptamos los atajos a nivel
+  // webContents y disparamos las acciones del clipboard directamente.
+  overlayWindow.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const mod = input.control || input.meta; // Ctrl en Win/Linux, Cmd en macOS
+    if (!mod) return;
+    const key = (input.key || "").toLowerCase();
+    const wc = overlayWindow.webContents;
+    if (key === "v") { wc.paste(); event.preventDefault(); }
+    else if (key === "c") { wc.copy(); event.preventDefault(); }
+    else if (key === "x") { wc.cut(); event.preventDefault(); }
+    else if (key === "a") { wc.selectAll(); event.preventDefault(); }
+    else if (key === "z" && !input.shift) { wc.undo(); event.preventDefault(); }
+    else if ((key === "z" && input.shift) || key === "y") { wc.redo(); event.preventDefault(); }
+  });
+
   if (b.compact) overlayWindow.webContents.once("did-finish-load", () => {
     overlayWindow.webContents.executeJavaScript('document.body.classList.add("compact")').catch(() => {});
   });
@@ -1505,6 +1525,20 @@ if (!gotSingleInstanceLock) {
 
 // ─── Ciclo de vida ──────────────────────────────────────────────
 app.whenReady().then(() => {
+  // Pastor 27-may-2026 — Bug reportado: pegar (Ctrl+V) desde ChatGPT al chat
+  // del HUD no funcionaba. Causa raíz: Electron NO registra los accelerators
+  // Cut/Copy/Paste/SelectAll por default; sin un Menu con role:'editMenu'
+  // los atajos no llegan al webContents aunque haya un <textarea> con foco.
+  // Fix: setApplicationMenu con editMenu role. La barra está autoHideMenuBar
+  // (no se ve), pero los accelerators sí quedan activos en TODAS las
+  // BrowserWindows (overlay, pairing, capture).
+  try {
+    const editTemplate = [{ role: "editMenu" }];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(editTemplate));
+  } catch (err) {
+    console.warn("[Bridge] setApplicationMenu(editMenu) failed:", err?.message || err);
+  }
+
   // Bridge 1.10.1 — Tray defensivo. Si Windows no logra dibujar el icono
   // (caso reportado por Pastor en una máquina Windows 11 con shell roto),
   // el resto del Bridge sigue funcionando y el HUD muestra el selector de

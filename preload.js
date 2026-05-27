@@ -118,7 +118,14 @@ contextBridge.exposeInMainWorld("overlayAPI", {
   sendLiveMessage: (text) => {
     const reqId = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     return new Promise((resolve) => {
-      const TIMEOUT_MS = 20_000;
+      // Pastor 27-may-2026 — Bug reportado: "Sin respuesta del cerebro (timeout)".
+      // Subimos 20s → 45s. Causa: tras bumpear maxTokens 320→700 en
+      // server/coproductor-live.ts y activar Gemini Audio multimodal
+      // (8-15s extra para procesar el clip de 10s del master), 20s era
+      // ajustado y cortaba respuestas largas de "cómo suena X". Mantenemos
+      // un techo (no infinito) para no dejar al HUD esperando para siempre
+      // si el server muere realmente.
+      const TIMEOUT_MS = 45_000;
       const handler = (_e, payload) => {
         if (!payload || payload.reqId !== reqId) return;
         ipcRenderer.removeListener("overlay:live-reply", handler);
