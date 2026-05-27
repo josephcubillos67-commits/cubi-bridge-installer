@@ -273,6 +273,103 @@ clearChatBtn.addEventListener("click", () => {
   }, 2500);
 });
 
+/* ============================================================
+ * AUDIO SOURCE PICKER (Bridge 1.10.1)
+ * ============================================================
+ * El selector vive en el HUD porque el tray de Windows no es confiable
+ * en todas las máquinas. La lista de devices la pueblan tres caminos:
+ *   1. getAudioState() al abrir el HUD (estado actual + cache)
+ *   2. onAudioInputs() push desde main.js cuando capture.html enumera
+ *   3. Re-emisión cada vez que el Pastor selecciona uno (eco de confirm)
+ * Cambio de device → main.js recicla captureWindow → HUD pasa de
+ * "EN REPOSO / -106 LUFS" a métricas vivas en ~5 segundos.
+ * ============================================================ */
+const audioPanel = $("#audio-panel");
+const audioList = $("#audio-panel-list");
+let audioState = { inputs: [], selected: { deviceId: null, label: null } };
+let audioPanelOpen = false;
+
+function renderAudioPanel() {
+  if (!audioList) return;
+  const { inputs, selected } = audioState;
+  if (!Array.isArray(inputs) || inputs.length === 0) {
+    audioList.innerHTML = '<div class="audio-panel-empty">Detectando entradas… (reabrí este menú en 3s si no aparece nada)</div>';
+    return;
+  }
+  const selId = selected?.deviceId || null;
+  const opts = [
+    {
+      deviceId: null,
+      label: "Default del sistema (WASAPI loopback)",
+      hint: "DEFAULT",
+    },
+    ...inputs.map((d) => ({
+      deviceId: d.deviceId,
+      label: d.label || d.deviceId || "Device sin nombre",
+      hint: /voicemeeter/i.test(d.label || "") ? "VOICEMEETER"
+          : /loopback/i.test(d.label || "") ? "LOOPBACK"
+          : /focusrite|presonus|studio/i.test(d.label || "") ? "INTERFAZ"
+          : "ENTRADA",
+    })),
+  ];
+  audioList.innerHTML = opts.map((o, i) => {
+    const isSel = (o.deviceId || null) === selId;
+    return `<button class="audio-opt ${isSel ? "selected" : ""}" data-aidx="${i}" type="button">
+      <span class="audio-opt-dot"></span>
+      <span class="audio-opt-label">${escapeAudio(o.label)}</span>
+      <span class="audio-opt-hint">${o.hint}</span>
+    </button>`;
+  }).join("");
+  audioList.querySelectorAll(".audio-opt").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = parseInt(btn.dataset.aidx, 10);
+      const opt = opts[idx];
+      if (!opt) return;
+      window.overlayAPI?.selectAudioInput(opt.deviceId, opt.label);
+      audioState.selected = { deviceId: opt.deviceId, label: opt.label };
+      renderAudioPanel();
+      // Cerrar dropdown tras 600ms para dar feedback visual del check.
+      setTimeout(() => toggleAudioPanel(false), 600);
+    });
+  });
+}
+function escapeAudio(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+function toggleAudioPanel(forceState) {
+  if (!audioPanel) return;
+  audioPanelOpen = (typeof forceState === "boolean") ? forceState : !audioPanelOpen;
+  audioPanel.classList.toggle("open", audioPanelOpen);
+  audioPanel.setAttribute("aria-hidden", String(!audioPanelOpen));
+  if (audioPanelOpen) {
+    // Refrescar contra el main al abrir, por si llegaron devices nuevos
+    if (typeof window.overlayAPI?.getAudioState === "function") {
+      window.overlayAPI.getAudioState().then((s) => {
+        if (s && Array.isArray(s.inputs)) {
+          audioState = s;
+          renderAudioPanel();
+        }
+      }).catch(() => {});
+    }
+    renderAudioPanel();
+  }
+}
+$("#btn-audio")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleAudioPanel();
+});
+document.addEventListener("click", (e) => {
+  if (
+    audioPanelOpen &&
+    !audioPanel.contains(e.target) &&
+    !$("#btn-audio").contains(e.target)
+  ) {
+    toggleAudioPanel(false);
+  }
+});
+
 $("#btn-settings").addEventListener("click", toggleSettings);
 $("#btn-close").addEventListener("click", () => {
   // En Electron real (HUD desktop): cerrar la ventana flotante via IPC.
@@ -768,6 +865,47 @@ window.addEventListener("DOMContentLoaded", () => {
         });
         ranked.forEach(pushObservationToChat);
       });
+    }
+
+    // Bridge 1.10.1 — Suscripción a la lista de devices (push desde main.js)
+    if (typeof window.overlayAPI?.onAudioInputs === "function") {
+      window.overlayAPI.onAudioInputs((payload) => {
+        if (!payload) return;
+        audioState = {
+          inputs: Array.isArray(payload.inputs) ? payload.inputs : [],
+          selected: payload.selected || { deviceId: null, label: null },
+        };
+        if (audioPanelOpen) renderAudioPanel();
+      });
+    }
+    // Bridge 1.10.1 — Si Windows no pudo crear el tray, mostrar banner en el HUD
+    // para que el Pastor sepa que el botón 🎤 del header reemplaza al tray menu.
+    if (typeof window.overlayAPI?.onTrayWarning === "function") {
+      window.overlayAPI.onTrayWarning((msg) => {
+        if (!msg) return;
+        const hud = $("#hud");
+        if (!hud || hud.querySelector(".tray-warning-banner")) return;
+        const banner = document.createElement("div");
+        banner.className = "tray-warning-banner";
+        banner.style.position = "absolute";
+        banner.style.top = "60px";
+        banner.style.left = "12px";
+        banner.style.right = "12px";
+        banner.style.zIndex = "9";
+        banner.textContent = String(msg);
+        hud.appendChild(banner);
+        renderMessage({
+          role: "assistant",
+          text: "⚠️ Windows no me dejó crear el ícono del tray. Usá el botón 🎤 del header para elegir la fuente de audio — hace exactamente lo mismo que el menú del tray.",
+        });
+      });
+    }
+    // Pedir estado inicial de audio (lista + selected) por si el HUD abrió
+    // antes que capture.html hubiera publicado los devices.
+    if (typeof window.overlayAPI?.getAudioState === "function") {
+      window.overlayAPI.getAudioState().then((s) => {
+        if (s && Array.isArray(s.inputs)) audioState = s;
+      }).catch(() => {});
     }
 
     // Indicador de status del Bridge en el chat (1 sola vez por cambio)

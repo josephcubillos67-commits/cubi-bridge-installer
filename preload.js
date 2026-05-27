@@ -94,6 +94,24 @@ contextBridge.exposeInMainWorld("overlayAPI", {
   close: () => ipcRenderer.send("overlay:close"),
   toggleCompact: () => ipcRenderer.send("overlay:toggle-compact"),
 
+  // Bridge 1.10.1 — Audio device picker DESDE EL HUD.
+  // El tray no es confiable en todas las máquinas (Windows 11 a veces no
+  // dibuja el icono ni en overflow). El HUD se vuelve el lugar canónico
+  // para elegir fuente de audio. Reusa el mismo store y la misma cadena
+  // capture.html → main.js → reciclado de captureWindow.
+  getAudioState: () => ipcRenderer.invoke("overlay:get-audio-state"),
+  selectAudioInput: (deviceId, label) => ipcRenderer.send("overlay:select-audio-input", { deviceId, label }),
+  onAudioInputs: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("overlay:audio-inputs", handler);
+    return () => ipcRenderer.removeListener("overlay:audio-inputs", handler);
+  },
+  onTrayWarning: (cb) => {
+    const handler = (_e, msg) => cb(msg);
+    ipcRenderer.on("overlay:tray-warning", handler);
+    return () => ipcRenderer.removeListener("overlay:tray-warning", handler);
+  },
+
   // Pastor 25-may-2026 · Live Copilot interactivo (HUD v2).
   // El usuario escribe en el chat del HUD → main.js → server WS → IA → respuesta.
   // sendLiveMessage genera un reqId único y resuelve la promesa cuando llega la respuesta correlacionada.

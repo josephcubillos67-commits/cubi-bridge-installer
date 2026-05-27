@@ -1128,3 +1128,121 @@ body[data-state="processing"] .viz-processing {
   body { padding: 8px; align-items: stretch; }
   #hud { width: 100% !important; height: 100vh !important; border-radius: 0; }
 }
+
+/* ============================================================
+ * AUDIO PANEL (Bridge 1.10.1) — selector de fuente dentro del HUD
+ * Mismo lenguaje visual que #settings-panel pero más alto para
+ * acomodar 4-10 devices. Cero modal, dropdown inline.
+ * ============================================================ */
+#audio-panel {
+  position: absolute;
+  top: 70px;
+  right: 16px;
+  width: 320px;
+  max-height: 380px;
+  background: var(--bg-glass-deep);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--border-glass-hover);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  z-index: 11;
+  opacity: 0;
+  transform: translateY(-8px) scale(0.96);
+  pointer-events: none;
+  transition: all 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+#audio-panel.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+.audio-panel-header {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 4px;
+}
+.audio-panel-hint, .audio-panel-footer {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  line-height: 1.35;
+}
+.audio-panel-hint { margin-bottom: 8px; }
+.audio-panel-footer { margin-top: 8px; opacity: 0.7; font-style: italic; }
+.audio-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex; flex-direction: column;
+  gap: 4px;
+  padding-right: 2px;
+}
+.audio-panel-empty {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 18px 8px;
+  font-style: italic;
+}
+.audio-opt {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--text);
+  text-align: left;
+  transition: all 140ms;
+  font-family: var(--font-sans);
+  width: 100%;
+  line-height: 1.25;
+}
+.audio-opt:hover {
+  background: rgba(212, 175, 55, 0.08);
+  border-color: rgba(212, 175, 55, 0.25);
+}
+.audio-opt.selected {
+  background: rgba(34, 197, 94, 0.10);
+  border-color: rgba(34, 197, 94, 0.45);
+  color: #ddffe0;
+}
+.audio-opt-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  flex-shrink: 0;
+}
+.audio-opt.selected .audio-opt-dot {
+  background: var(--green, #22c55e);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+.audio-opt-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audio-opt-hint {
+  font-size: 9px;
+  color: var(--text-dim);
+  opacity: 0.7;
+  flex-shrink: 0;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.tray-warning-banner {
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.45);
+  color: #fde68a;
+  font-size: 10.5px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  line-height: 1.35;
+}

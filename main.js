@@ -393,7 +393,7 @@ function rebuildMenu(state) {
     },
     { label: "Salir", click: () => { app.isQuitting = true; app.quit(); } },
   ]);
-  tray.setContextMenu(menu);
+  if (tray) tray.setContextMenu(menu);
 }
 
 // ─── Auto-launch on boot (Windows login item) ───────────────────
@@ -724,6 +724,37 @@ ipcMain.on("bridge:audio-inputs", (_e, list) => {
       kind: d.kind,
     }));
   try { rebuildMenu(currentTrayState); } catch (e) { console.warn("[Bridge] rebuildMenu post-inputs falló:", e.message); }
+  // Bridge 1.10.1 — forward al HUD para el selector inline (sustituye al tray
+  // cuando Windows no dibuja el icono).
+  forwardToOverlay("overlay:audio-inputs", {
+    inputs: cachedAudioInputs,
+    selected: {
+      deviceId: store.get("audioInputDeviceId") || null,
+      label: store.get("audioInputLabel") || null,
+    },
+  });
+});
+
+// Bridge 1.10.1 — IPC handlers del selector dentro del HUD.
+ipcMain.handle("overlay:get-audio-state", () => ({
+  inputs: cachedAudioInputs,
+  selected: {
+    deviceId: store.get("audioInputDeviceId") || null,
+    label: store.get("audioInputLabel") || null,
+  },
+}));
+ipcMain.on("overlay:select-audio-input", (_e, payload) => {
+  const deviceId = payload && payload.deviceId ? String(payload.deviceId) : null;
+  const label = payload && payload.label ? String(payload.label) : null;
+  selectAudioInput(deviceId, label);
+  // Re-emitir estado al HUD para que el dropdown refleje el cambio.
+  forwardToOverlay("overlay:audio-inputs", {
+    inputs: cachedAudioInputs,
+    selected: {
+      deviceId: store.get("audioInputDeviceId") || null,
+      label: store.get("audioInputLabel") || null,
+    },
+  });
 });
 
 function selectAudioInput(deviceId, label) {
@@ -1474,8 +1505,24 @@ if (!gotSingleInstanceLock) {
 
 // ─── Ciclo de vida ──────────────────────────────────────────────
 app.whenReady().then(() => {
-  tray = new Tray(makeTrayIcon("#ef4444"));
-  updateTrayState(store.get("token") ? "disconnected" : "pairing");
+  // Bridge 1.10.1 — Tray defensivo. Si Windows no logra dibujar el icono
+  // (caso reportado por Pastor en una máquina Windows 11 con shell roto),
+  // el resto del Bridge sigue funcionando y el HUD muestra el selector de
+  // audio inline. Antes esto crasheaba silenciosamente y se perdía TODO el
+  // resto del whenReady (connect, openOverlayWindow, etc.).
+  let trayWarning = null;
+  try {
+    tray = new Tray(makeTrayIcon("#ef4444"));
+    updateTrayState(store.get("token") ? "disconnected" : "pairing");
+  } catch (err) {
+    tray = null;
+    trayWarning = "Windows no pudo crear el ícono del tray (" + (err.message || err) + "). El HUD sigue funcionando — usá el menú 🎤 dentro del HUD para elegir la fuente de audio.";
+    console.error("[Bridge] Tray creation failed:", err);
+    // Notificar al HUD apenas cargue.
+    setTimeout(() => {
+      try { forwardToOverlay("overlay:tray-warning", trayWarning); } catch {}
+    }, 2000);
+  }
 
   // Bridge 2: abrir puerto IPC local (READ-ONLY) para el VST3 Companion
   startLocalIpcServer();

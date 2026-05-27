@@ -44,6 +44,9 @@
         <button class="ctrl-btn" id="btn-clear-chat" title="Borrar todo el chat" aria-label="Borrar todo el chat" data-confirming="false">
           <svg viewBox="0 0 16 16"><path d="M3 5 h10 M5 5 v8 a1 1 0 0 0 1 1 h4 a1 1 0 0 0 1 -1 v-8 M6 5 v-1 a1 1 0 0 1 1 -1 h2 a1 1 0 0 1 1 1 v1 M6.5 7.5 v4 M9.5 7.5 v4" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
+        <button class="ctrl-btn" id="btn-audio" title="Fuente de audio (qué entrada escucha el HUD)" aria-label="Fuente de audio">
+          <svg viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="8" rx="2" fill="currentColor"/><path d="M3 8 a5 5 0 0 0 10 0 M8 13 v2 M5 15 h6" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
+        </button>
         <button class="ctrl-btn" id="btn-settings" title="Ajustes (transparencia, posición)" aria-label="Ajustes">
           <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1 v2 M8 13 v2 M1 8 h2 M13 8 h2 M3 3 l1.5 1.5 M11.5 11.5 l1.5 1.5 M3 13 l1.5 -1.5 M11.5 4.5 l1.5 -1.5" stroke="currentColor" stroke-width="1.5"/></svg>
         </button>
@@ -211,6 +214,19 @@
         <svg viewBox="0 0 16 16"><path d="M2 8 L14 2 L11 8 L14 14 Z" fill="currentColor"/></svg>
       </button>
     </footer>
+
+    <!-- Bridge 1.10.1 — Panel "Fuente de audio". Se abre con btn-audio.
+         ADN CUBI: cero modal. Es un dropdown inline en el header, no detiene
+         la sesión. Lista los devices visibles (poblada por capture.html tras
+         pedir permiso) y permite cambiar al vuelo. -->
+    <aside id="audio-panel" aria-hidden="true">
+      <div class="audio-panel-header">🎤 Fuente de audio</div>
+      <div class="audio-panel-hint">Qué entrada escucha el HUD para LUFS/Picos/Bandas.</div>
+      <div class="audio-panel-list" id="audio-panel-list">
+        <div class="audio-panel-empty">Detectando entradas…</div>
+      </div>
+      <div class="audio-panel-footer">El cambio recicla la captura en ~1s.</div>
+    </aside>
 
     <!-- Panel de ajustes (oculto por default, se abre con btn-settings) -->
     <aside id="settings-panel" aria-hidden="true">
