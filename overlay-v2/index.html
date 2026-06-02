@@ -32,6 +32,10 @@
       </div>
 
       <div class="controls">
+        <button class="ctrl-btn lab-open" id="btn-open-lab" title="Abrir el Laboratorio (página principal del chat) en el navegador" aria-label="Abrir el Laboratorio">
+          <svg viewBox="0 0 16 16"><path d="M9 2 h5 v5 M14 2 L7 9 M12 9 v4 a1 1 0 0 1 -1 1 H3 a1 1 0 0 1 -1 -1 V5 a1 1 0 0 1 1 -1 h4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="lab-open-text">LAB</span>
+        </button>
         <button class="ctrl-btn" id="btn-clickthrough" title="Click-through (mouse atraviesa al DAW)" aria-label="Toggle click-through">
           <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>
         </button>
@@ -41,8 +45,14 @@
         <button class="ctrl-btn" id="btn-dock" title="Acoplar al borde de la pantalla" aria-label="Acoplar lateral">
           <svg viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="12" fill="currentColor" opacity="0.6"/><rect x="8" y="2" width="6" height="12" fill="none" stroke="currentColor" stroke-width="1"/></svg>
         </button>
-        <button class="ctrl-btn" id="btn-clear-chat" title="Borrar todo el chat" aria-label="Borrar todo el chat" data-confirming="false">
+        <button class="ctrl-btn" id="btn-clear-chat" title="🗑️ Borrar chat (sólo limpia las burbujas — el cerebro sigue recordando)" aria-label="Borrar chat" data-confirming="false">
           <svg viewBox="0 0 16 16"><path d="M3 5 h10 M5 5 v8 a1 1 0 0 0 1 1 h4 a1 1 0 0 0 1 -1 v-8 M6 5 v-1 a1 1 0 0 1 1 -1 h2 a1 1 0 0 1 1 1 v1 M6.5 7.5 v4 M9.5 7.5 v4" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="ctrl-btn" id="btn-reset-conv" title="🧹 Reset conversación (borra chat + memoria del cerebro)" aria-label="Reset conversación" data-confirming="false">
+          <svg viewBox="0 0 16 16"><path d="M14 4 v4 h-4 M14 8 a6 6 0 1 0 -2 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/></svg>
+        </button>
+        <button class="ctrl-btn" id="btn-reload" title="🔄 Refrescar HUD (preserva pairing y posición)" aria-label="Refrescar HUD">
+          <svg viewBox="0 0 16 16"><path d="M13 8 a5 5 0 1 1 -1.46 -3.54 M13 2.5 v3 h-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <button class="ctrl-btn" id="btn-audio" title="Fuente de audio (qué entrada escucha el HUD)" aria-label="Fuente de audio">
           <svg viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="8" rx="2" fill="currentColor"/><path d="M3 8 a5 5 0 0 0 10 0 M8 13 v2 M5 15 h6" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
@@ -203,7 +213,7 @@
 
     <!-- INPUT: chat textual + futuro micrófono -->
     <footer id="hud-input">
-      <button class="input-btn mic" id="btn-mic" title="Voz (próxima fase)" aria-label="Activar voz" disabled>
+      <button class="input-btn mic" id="btn-mic" title="Hablar (toca para grabar, toca de nuevo para terminar)" aria-label="Hablar al copiloto">
         <svg viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="8" rx="2" fill="currentColor"/><path d="M3 8 a5 5 0 0 0 10 0 M8 13 v2" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
       </button>
       <textarea

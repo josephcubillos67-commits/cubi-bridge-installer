@@ -98,6 +98,36 @@ contextBridge.exposeInMainWorld("overlayAPI", {
   close: () => ipcRenderer.send("overlay:close"),
   toggleCompact: () => ipcRenderer.send("overlay:toggle-compact"),
 
+  // Pastor 28-may-2026 — Refrescar el HUD sin perder pairing/token.
+  // El main hace webContents.reloadIgnoringCache() sobre la misma ventana,
+  // preservando posición, modo compacto y la WS del Bridge intacta.
+  reload: () => ipcRenderer.send("overlay:reload"),
+
+  // Pastor 28-may-2026 — Reset conversacional (limpia memoria server-side).
+  // Diferencia con "borrar chat" (que es solo visual cliente):
+  //   - borrar chat → vacía burbujas del DOM, server sigue recordando topics.
+  //   - reset conversación → manda WS al server que llama resetLiveConversation()
+  //     wipeando el ring buffer del anti-repetición para este userId.
+  // Devuelve promesa que resuelve cuando el server confirma (o timeout 5s).
+  resetConversation: () => {
+    const reqId = `reset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve) => {
+      const TIMEOUT_MS = 5_000;
+      const handler = (_e, payload) => {
+        if (!payload || payload.reqId !== reqId) return;
+        ipcRenderer.removeListener("overlay:reset-reply", handler);
+        clearTimeout(timer);
+        resolve({ ok: !!payload.ok, reason: payload.reason || null });
+      };
+      const timer = setTimeout(() => {
+        ipcRenderer.removeListener("overlay:reset-reply", handler);
+        resolve({ ok: false, reason: "timeout" });
+      }, TIMEOUT_MS);
+      ipcRenderer.on("overlay:reset-reply", handler);
+      ipcRenderer.send("overlay:reset-conversation", { reqId });
+    });
+  },
+
   // Bridge 1.10.1 — Audio device picker DESDE EL HUD.
   // El tray no es confiable en todas las máquinas (Windows 11 a veces no
   // dibuja el icono ni en overflow). El HUD se vuelve el lugar canónico
@@ -158,5 +188,36 @@ contextBridge.exposeInMainWorld("overlayAPI", {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on("overlay:live-reply", handler);
     return () => ipcRenderer.removeListener("overlay:live-reply", handler);
+  },
+
+  // Pastor 02-jun-2026 · Micrófono del HUD → texto.
+  // El Pastor habla en el HUD; el overlay graba la voz (WebM/Opus base64) y la
+  // manda acá. Viaja por la misma WS autenticada del Bridge → server → Gemini
+  // Audio (modo transcripción) → texto de vuelta. Mismo patrón reqId/reply que
+  // sendLiveMessage. El HUD pone el texto en la cajita para revisar antes de
+  // enviar (la transcripción ES no es perfecta).
+  transcribeVoice: (base64, mimeType) => {
+    const reqId = `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve) => {
+      // Transcribir un clip de voz con Gemini Audio toma unos segundos; damos
+      // margen amplio (30s) sin ser infinito.
+      const TIMEOUT_MS = 30_000;
+      const handler = (_e, payload) => {
+        if (!payload || payload.reqId !== reqId) return;
+        ipcRenderer.removeListener("overlay:transcribe-reply", handler);
+        clearTimeout(timer);
+        resolve({
+          ok: !!payload.ok,
+          text: String(payload.text || ""),
+          reason: payload.reason || null,
+        });
+      };
+      const timer = setTimeout(() => {
+        ipcRenderer.removeListener("overlay:transcribe-reply", handler);
+        resolve({ ok: false, text: "", reason: "timeout" });
+      }, TIMEOUT_MS);
+      ipcRenderer.on("overlay:transcribe-reply", handler);
+      ipcRenderer.send("overlay:transcribe-voice", { reqId, audio: String(base64 || ""), mimeType: mimeType || "audio/webm" });
+    });
   },
 });

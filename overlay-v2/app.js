@@ -246,32 +246,294 @@ async function sendUserMessage() {
 $("#btn-mode").addEventListener("click", cycleMode);
 $("#btn-clickthrough").addEventListener("click", toggleClickthrough);
 $("#btn-dock").addEventListener("click", cycleDock);
-/* Botón "borrar todo el chat" — Pastor 26-may-2026
-   ADN CUBI: cero modal. Primer click → botón rojo pulsando 2.5s ("¿seguro?").
-   Segundo click dentro de la ventana → limpia el chat. Si pasan 2.5s sin
-   confirmar, vuelve a estado normal. */
+/* Botones de limpieza del chat — Pastor 28-may-2026 (2 niveles)
+   ADN CUBI: cero modal. Confirmación inline por doble-click (2.5s ventana).
+   ─ 🗑️ Borrar chat  → sólo limpia las burbujas visibles. El cerebro server
+                       sigue recordando los topics (anti-repetición intacto).
+   ─ 🧹 Reset conversación → limpia burbujas + manda WS al server para wipear
+                              el ring buffer del anti-repetición de este userId.
+                              Empezás fresco real. */
+function wireConfirmButton(btn, onConfirmed, baseTitle) {
+  let confirmTimer = null;
+  btn.addEventListener("click", async () => {
+    if (btn.dataset.confirming === "true") {
+      clearTimeout(confirmTimer);
+      confirmTimer = null;
+      btn.dataset.confirming = "false";
+      btn.title = baseTitle;
+      await onConfirmed();
+      return;
+    }
+    btn.dataset.confirming = "true";
+    btn.title = "Tocá de nuevo para confirmar";
+    confirmTimer = setTimeout(() => {
+      btn.dataset.confirming = "false";
+      btn.title = baseTitle;
+      confirmTimer = null;
+    }, 2500);
+  });
+}
+
+function fadeOutChat() {
+  const msgs = Array.from(chatLog.querySelectorAll(".msg"));
+  msgs.forEach(m => m.classList.add("removing"));
+  return new Promise((r) => setTimeout(() => {
+    chatLog.innerHTML = "";
+    r();
+  }, 240));
+}
+
+/* 🗑️ Borrar chat — sólo visual. */
 const clearChatBtn = $("#btn-clear-chat");
-let clearChatConfirmTimer = null;
-clearChatBtn.addEventListener("click", () => {
-  if (clearChatBtn.dataset.confirming === "true") {
-    clearTimeout(clearChatConfirmTimer);
-    clearChatConfirmTimer = null;
-    clearChatBtn.dataset.confirming = "false";
-    clearChatBtn.title = "Borrar todo el chat";
-    // Fade out de todos los mensajes y luego vaciar
-    const msgs = Array.from(chatLog.querySelectorAll(".msg"));
-    msgs.forEach(m => m.classList.add("removing"));
-    setTimeout(() => { chatLog.innerHTML = ""; }, 240);
+wireConfirmButton(
+  clearChatBtn,
+  async () => { await fadeOutChat(); },
+  "🗑️ Borrar chat (sólo limpia las burbujas — el cerebro sigue recordando)"
+);
+
+/* 🧹 Reset conversación — visual + memoria server. */
+const resetConvBtn = $("#btn-reset-conv");
+if (resetConvBtn) {
+  wireConfirmButton(
+    resetConvBtn,
+    async () => {
+      await fadeOutChat();
+      let serverOk = false;
+      let reason = null;
+      if (window.overlayAPI?.resetConversation) {
+        try {
+          const res = await window.overlayAPI.resetConversation();
+          serverOk = !!res?.ok;
+          reason = res?.reason || null;
+        } catch (_) { serverOk = false; reason = "exception"; }
+      }
+      // Confirmación discreta como mensaje del copiloto (cero modal).
+      renderMessage({
+        role: "assistant",
+        text: serverOk
+          ? "Listo, conversación reseteada. Empezamos fresco — sin contexto viejo."
+          : `Chat limpio acá, pero no pude resetear el cerebro (${reason || "sin respuesta"}). Reintentá o reabrí el HUD.`,
+      });
+    },
+    "🧹 Reset conversación (borra chat + memoria del cerebro)"
+  );
+}
+
+/* 🔄 Refrescar HUD — recarga el bundle preservando pairing y posición. */
+const reloadBtn = $("#btn-reload");
+if (reloadBtn) {
+  reloadBtn.addEventListener("click", () => {
+    if (window.overlayAPI?.reload) window.overlayAPI.reload();
+  });
+}
+
+/* ============================================================
+ * 🎤 MICRÓFONO — voz → texto (Pastor 02-jun-2026)
+ * ============================================================
+ * El Pastor pidió poder HABLARLE al copiloto además de escribir.
+ * Flujo (ADN CUBI: cero modal, una sola pantalla):
+ *   1. Toca 🎤 → empieza a grabar (botón en rojo pulsante).
+ *   2. Habla.
+ *   3. Toca 🎤 de nuevo → "Transcribiendo…" y manda el clip al cerebro.
+ *   4. El texto vuelve y cae en la CAJITA — el Pastor lo revisa/corrige y
+ *      envía con Enter o el botón. NO se envía solo: la transcripción en
+ *      español no es perfecta (honestidad > magia).
+ * La cajita de texto sigue 100% funcional en paralelo (las dos cosas).
+ * Graba en WebM/Opus — mismo formato que ya funciona con Gemini Audio.
+ * ============================================================ */
+const micBtn = $("#btn-mic");
+let micRecorder = null;
+let micChunks = [];
+let micStream = null;
+let micRecording = false;
+let micBusy = false; // mientras transcribe, evita doble disparo
+let micAborted = false; // true → al parar, descartar sin transcribir (minimizar/cerrar)
+
+function setMicState(recording) {
+  micRecording = recording;
+  if (!micBtn) return;
+  micBtn.classList.toggle("recording", recording);
+  micBtn.title = recording
+    ? "Grabando… tocá para terminar"
+    : "Hablar (toca para grabar, toca de nuevo para terminar)";
+}
+
+function stopMicStream() {
+  try { if (micStream) micStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+  micStream = null;
+}
+
+/* El Pastor habla por su PreSonus StudioLive USB (no el micrófono interno de
+   la PC). Pidió que el micrófono se conecte SOLO a ese dispositivo de forma
+   automática. Camino: pedimos permiso genérico (desbloquea los labels de
+   enumerateDevices), buscamos un input cuyo nombre matchee StudioLive/PreSonus
+   y reconectamos a ESE deviceId. Si no aparece, nos quedamos con el genérico
+   (fallback honesto — no rompemos si la interfaz no está enchufada). */
+const PREFERRED_MIC_RE = /studio\s*live|presonus/i;
+
+async function pickPreferredMicStream() {
+  let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === "audioinput");
+    const preferred = inputs.find((d) => PREFERRED_MIC_RE.test(d.label || ""));
+    if (preferred && preferred.deviceId) {
+      const currentId = stream.getAudioTracks()[0]?.getSettings?.().deviceId;
+      if (currentId !== preferred.deviceId) {
+        stream.getTracks().forEach((t) => t.stop());
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { deviceId: { exact: preferred.deviceId } },
+          });
+        } catch (_) {
+          // Si la interfaz falla al abrir explícita, volvemos al genérico.
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+      }
+    }
+  } catch (_) {
+    // enumerateDevices puede fallar; nos quedamos con el stream genérico.
+  }
+  return stream;
+}
+
+async function startMicRecording() {
+  // Sin overlayAPI (preview web sin Bridge) el micrófono no transcribe.
+  if (!window.overlayAPI?.transcribeVoice) {
+    renderMessage({
+      role: "assistant",
+      text: "El micrófono funciona en el HUD de escritorio (no en la vista del navegador).",
+    });
     return;
   }
-  clearChatBtn.dataset.confirming = "true";
-  clearChatBtn.title = "Tocá de nuevo para confirmar";
-  clearChatConfirmTimer = setTimeout(() => {
-    clearChatBtn.dataset.confirming = "false";
-    clearChatBtn.title = "Borrar todo el chat";
-    clearChatConfirmTimer = null;
-  }, 2500);
-});
+  try {
+    micStream = await pickPreferredMicStream();
+  } catch (err) {
+    renderMessage({
+      role: "assistant",
+      text: "No pude acceder al micrófono. Revisá que Windows tenga permiso de micrófono para la app.",
+    });
+    return;
+  }
+  micChunks = [];
+  micAborted = false;
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : (MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "");
+  try {
+    try {
+      micRecorder = mimeType ? new MediaRecorder(micStream, { mimeType }) : new MediaRecorder(micStream);
+    } catch (_) {
+      micRecorder = new MediaRecorder(micStream);
+    }
+    micRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) micChunks.push(e.data); };
+    micRecorder.onstop = () => { handleMicStop().catch(() => {}); };
+    micRecorder.start();
+    setMicState(true);
+    setVisual("listening");
+  } catch (err) {
+    // Cualquier fallo creando/arrancando el recorder → soltar el stream para
+    // no dejar el micrófono abierto (sin esto el LED del mic queda encendido).
+    stopMicStream();
+    micRecorder = null;
+    setMicState(false);
+    setVisual("idle");
+    renderMessage({ role: "assistant", text: "No pude iniciar la grabación. Probá de nuevo." });
+  }
+}
+
+/* Aborta la grabación en curso SIN transcribir (minimizar/cerrar/ocultar).
+   Suelta el MediaRecorder y el MediaStream para no dejar el micrófono abierto. */
+function abortMicRecording() {
+  if (!micRecording) return;
+  micAborted = true;
+  try { if (micRecorder && micRecorder.state !== "inactive") micRecorder.stop(); } catch (_) {}
+  // Si onstop no llega (window oculta), forzamos limpieza igual.
+  stopMicStream();
+  micChunks = [];
+  setMicState(false);
+}
+
+async function handleMicStop() {
+  setMicState(false);
+  stopMicStream();
+  if (micAborted) {
+    // Grabación descartada a propósito (minimizar/cerrar) — no transcribir.
+    micAborted = false;
+    micChunks = [];
+    setVisual("idle");
+    return;
+  }
+  const blob = new Blob(micChunks, { type: "audio/webm" });
+  micChunks = [];
+  if (!blob.size) {
+    setVisual("idle");
+    return;
+  }
+  micBusy = true;
+  setVisual("thinking");
+  // Indicador discreto en la cajita mientras transcribe (cero modal).
+  const prevPlaceholder = chatInput.placeholder;
+  chatInput.placeholder = "Transcribiendo lo que dijiste…";
+  try {
+    const base64 = await blobToBase64(blob);
+    const res = await window.overlayAPI.transcribeVoice(base64, "audio/webm");
+    if (res?.ok && res.text) {
+      // El texto cae en la cajita — el Pastor revisa y envía.
+      chatInput.value = chatInput.value
+        ? `${chatInput.value} ${res.text}`.trim()
+        : res.text;
+      chatInput.focus();
+      autoGrowInput();
+      setVisual("idle");
+    } else {
+      const reason = res?.reason;
+      const msg = reason === "timeout"
+        ? "La transcripción tardó demasiado. Probá de nuevo con una frase más corta."
+        : (reason === "bridge-offline"
+            ? "El Bridge está desconectado. Reconectalo desde el tray."
+            : "No te entendí bien. Probá de nuevo, hablando claro y cerca del micrófono.");
+      setVisual("error", { autoRevert: 2600 });
+      renderMessage({ role: "assistant", text: msg });
+    }
+  } catch (err) {
+    setVisual("error", { autoRevert: 2600 });
+    renderMessage({ role: "assistant", text: "Hubo un problema transcribiendo el audio. Probá de nuevo." });
+  } finally {
+    micBusy = false;
+    chatInput.placeholder = prevPlaceholder;
+  }
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      // result viene como "data:audio/webm;base64,XXXX" — nos quedamos con XXXX.
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function autoGrowInput() {
+  chatInput.style.height = "auto";
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + "px";
+}
+
+if (micBtn) {
+  micBtn.addEventListener("click", () => {
+    if (micBusy) return; // está transcribiendo, ignorar
+    if (micRecording) {
+      try { if (micRecorder && micRecorder.state !== "inactive") micRecorder.stop(); } catch (_) {}
+    } else {
+      startMicRecording();
+    }
+  });
+}
 
 /* ============================================================
  * AUDIO SOURCE PICKER (Bridge 1.10.1)
@@ -377,7 +639,23 @@ $("#btn-settings").addEventListener("click", toggleSettings);
 // scroll, state visual. Al reabrirlo desde el tray (toggleOverlay) el
 // openOverlayWindow detecta la window existente y llama .show() en vez
 // de crear una nueva. ADN CUBI: un icono inline, cero modal.
+// Botón "Abrir LAB": lleva directo a la página principal del Laboratorio
+// (donde está el chat grande) en el navegador. La plomería ya existe en main.js
+// (overlay:open-lab → shell.openExternal(SERVER_URL + "/lab")).
+const openLabBtn = $("#btn-open-lab");
+if (openLabBtn) {
+  openLabBtn.addEventListener("click", () => {
+    if (typeof window.overlayAPI?.openLab === "function") {
+      window.overlayAPI.openLab();
+      return;
+    }
+    // Fallback en preview web (sin Electron): abrir en pestaña nueva.
+    try { window.open("/lab", "_blank", "noopener"); } catch (_) {}
+  });
+}
+
 $("#btn-minimize").addEventListener("click", () => {
+  abortMicRecording(); // no dejar el micrófono grabando en una ventana oculta
   if (typeof window.overlayAPI?.minimize === "function") {
     window.overlayAPI.minimize();
     return;
@@ -387,7 +665,15 @@ $("#btn-minimize").addEventListener("click", () => {
   setTimeout(() => { $("#hud").style.opacity = state.opacity; }, 240);
 });
 
+// Red de seguridad: si la ventana se oculta o se cierra por cualquier vía
+// (tray toggle, cierre del SO, etc.) mientras se graba, soltar el micrófono.
+window.addEventListener("beforeunload", () => { abortMicRecording(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) abortMicRecording();
+});
+
 $("#btn-close").addEventListener("click", () => {
+  abortMicRecording(); // soltar el micrófono antes de cerrar
   // En Electron real (HUD desktop): cerrar la ventana flotante via IPC.
   // En preview web: animación de fade-out + mensaje.
   if (typeof window.overlayAPI?.close === "function") {

@@ -336,6 +336,14 @@ function rebuildMenu(state) {
       enabled: hasToken,
       click: () => resetOverlayPosition(),
     },
+    {
+      // Pastor 28-may-2026 — Atajo directo al CUBI Lab desde el tray.
+      // Mismo target que el botón "🎛 Abrir LAB completo" del HUD, pero
+      // accesible sin necesidad de tener el HUD visible. Abre en el browser
+      // default del Pastor (no en Electron) — el Lab es la web completa.
+      label: "🧪 Abrir CUBI Lab",
+      click: () => { shell.openExternal(`${SERVER_URL}/lab`); },
+    },
     { type: "separator" },
     {
       label: hasToken ? "Re-emparejar estudio…" : "Emparejar estudio…",
@@ -414,6 +422,36 @@ function ensureAutoLaunchDefault() {
     console.log("[Bridge] Auto-launch on boot habilitado por defecto (--hidden).");
   } catch (err) {
     console.warn("[Bridge] No se pudo configurar auto-launch:", err.message);
+  }
+}
+
+// ─── Pastor 28-may-2026 — Shortcut "CUBI Lab" en escritorio ─────
+// Crea un .url (Windows Internet Shortcut) la primera vez que arranca el
+// Bridge. El Pastor entonces tiene 2 accesos al Lab:
+//   1. Tray menu → "🧪 Abrir CUBI Lab"
+//   2. Doble-click en el .url del escritorio
+// Ambos abren la URL en el browser default — el Lab es la web completa.
+// .url es nativo de Windows (archivo INI), no requiere deps externas ni
+// shell.writeShortcutLink (que requiere target ejecutable, no URL).
+function ensureLabDesktopShortcut() {
+  if (process.platform !== "win32") return;
+  if (store.get("labShortcutCreated")) return;
+  try {
+    const desktopPath = app.getPath("desktop");
+    const urlFile = path.join(desktopPath, "CUBI Lab.url");
+    if (fs.existsSync(urlFile)) {
+      store.set("labShortcutCreated", true);
+      return;
+    }
+    // Formato INI estándar de Windows. CRLF obligatorio para que el shell
+    // de Windows lo reconozca como Internet Shortcut válido.
+    const content = `[InternetShortcut]\r\nURL=${SERVER_URL}/lab\r\nIconIndex=0\r\n`;
+    fs.writeFileSync(urlFile, content, "utf8");
+    store.set("labShortcutCreated", true);
+    console.log("[Bridge] CUBI Lab.url creado en escritorio.");
+  } catch (err) {
+    // No-fatal — el tray menu sigue funcionando aunque falle el escritorio.
+    console.warn("[Bridge] No se pudo crear shortcut Lab:", err?.message || err);
   }
 }
 
@@ -645,6 +683,43 @@ ipcMain.on("overlay:toggle-compact", () => {
   toggleOverlayCompact();
 });
 
+// Pastor 28-may-2026 — Refrescar el HUD sin perder pairing/token/WS.
+// reloadIgnoringCache() recarga el bundle del overlay-v2 (HTML/CSS/JS)
+// pero la ventana es la misma → posición, modo compacto y la WS del
+// Bridge sobreviven. Sirve cuando el chat se queda colgado o la UI quedó
+// en estado raro tras una hora de uso, sin tener que cerrar y re-emparejar.
+ipcMain.on("overlay:reload", () => {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    try { overlayWindow.webContents.reloadIgnoringCache(); } catch {}
+  }
+});
+
+// Pastor 28-may-2026 — Reset conversacional: forward por WS al server.
+// El server wipea el ring buffer del anti-repetición para este userId y
+// nos devuelve {type:"live-reset-reply"}, que reenviamos al overlay como
+// "overlay:reset-reply" para que la preload Promise resuelva.
+ipcMain.on("overlay:reset-conversation", (_event, payload) => {
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      forwardToOverlay("overlay:reset-reply", {
+        reqId: payload?.reqId || null,
+        ok: false,
+        reason: "bridge-offline",
+      });
+      return;
+    }
+    const reqId = String(payload?.reqId || `reset-${Date.now()}`);
+    ws.send(JSON.stringify({ type: "live-reset", reqId }));
+  } catch (e) {
+    console.error("[Bridge] overlay:reset-conversation falló:", e?.message || e);
+    forwardToOverlay("overlay:reset-reply", {
+      reqId: payload?.reqId || null,
+      ok: false,
+      reason: "send-error",
+    });
+  }
+});
+
 // Pastor 25-may-2026 · Live Copilot interactivo (HUD v2):
 // El input de chat del HUD manda mensajes acá; los reenviamos al server por la
 // misma WS autenticada del Bridge. La respuesta vuelve por el handler de ws.on("message")
@@ -670,6 +745,39 @@ ipcMain.on("overlay:send-live-message", (_event, payload) => {
       reqId: payload?.reqId || null,
       ok: false,
       text: "Error mandando el mensaje al cerebro.",
+      reason: "send-error",
+      ts: Date.now(),
+    });
+  }
+});
+
+// Pastor 02-jun-2026 · Micrófono del HUD → texto.
+// El overlay graba la voz del Pastor (WebM/Opus base64) y la manda acá; la
+// reenviamos al server por la misma WS autenticada. La respuesta vuelve como
+// msg.type === "live-transcribe-reply" (handler de ws.on("message") más abajo)
+// y se reenvía al overlayWindow por IPC ("overlay:transcribe-reply").
+ipcMain.on("overlay:transcribe-voice", (_event, payload) => {
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      forwardToOverlay("overlay:transcribe-reply", {
+        reqId: payload?.reqId || null,
+        ok: false,
+        text: "",
+        reason: "bridge-offline",
+        ts: Date.now(),
+      });
+      return;
+    }
+    const reqId = String(payload?.reqId || `voice-${Date.now()}`);
+    const audio = String(payload?.audio || "");
+    const mimeType = String(payload?.mimeType || "audio/webm");
+    ws.send(JSON.stringify({ type: "live-transcribe", reqId, audio, mimeType }));
+  } catch (e) {
+    console.error("[Bridge] overlay:transcribe-voice fallo:", e?.message || e);
+    forwardToOverlay("overlay:transcribe-reply", {
+      reqId: payload?.reqId || null,
+      ok: false,
+      text: "",
       reason: "send-error",
       ts: Date.now(),
     });
@@ -952,6 +1060,31 @@ function openOverlayWindow() {
   overlayWindow.setAlwaysOnTop(true, "floating");
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
+  // Pastor 02-jun-2026 · Permiso de micrófono para el HUD.
+  // El overlay graba la voz del Pastor con getUserMedia({audio:true}). En
+  // Electron, sin un permission handler, getUserMedia para el micrófono se
+  // deniega por defecto. Aprobamos "media" SÓLO en la session del overlay
+  // (igual patrón que captureSession para el loopback del master). Cualquier
+  // otro permiso se deniega — el HUD no necesita cámara, geolocalización, etc.
+  try {
+    const overlaySession = overlayWindow.webContents.session;
+    // Solo micrófono: aprobamos "media" únicamente si NO pide cámara.
+    // El HUD jamás necesita video; denegar la cámara explícitamente.
+    overlaySession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+      if (permission !== "media") return callback(false);
+      const types = (details && details.mediaTypes) || [];
+      if (types.includes("video")) return callback(false);
+      callback(true);
+    });
+    overlaySession.setPermissionCheckHandler((_wc, permission, _origin, details) => {
+      if (permission !== "media") return false;
+      const mt = details && details.mediaType;
+      return mt === "audio" || mt === "unknown";
+    });
+  } catch (e) {
+    console.warn("[Bridge] No pude setear permiso de micrófono en el overlay:", e?.message || e);
+  }
+
   // Pastor 27-may-2026 — Cinturón y tirantes para pegar (Ctrl+V) desde
   // apps externas (ChatGPT, navegador). Aunque setApplicationMenu con
   // editMenu role ya registra los accelerators, en Electron con frame:false
@@ -1154,6 +1287,15 @@ function connect() {
         // desde el HUD overlay. El server llama coproductor-style.computeStyleTag()
         // y manda la respuesta por la misma WS. Reenviamos al overlay vía IPC.
         relayStyleTagReply(msg);
+      } else if (msg.type === "live-reset-reply") {
+        // Pastor 28-may-2026 — ack del reset conversacional. Reenviamos
+        // al overlay para que la promise de preload.js (resetConversation)
+        // resuelva y el botón 🧹 pueda mostrar feedback visual al Pastor.
+        forwardToOverlay("overlay:reset-reply", {
+          reqId: msg.reqId || null,
+          ok: !!msg.ok,
+          reason: msg.reason || null,
+        });
       } else if (msg.type === "live-reply") {
         // Pastor 25-may-2026 · respuesta del Live Copilot interactivo.
         // Vino por la misma WS del Bridge tras un live-message enviado
@@ -1166,6 +1308,18 @@ function connect() {
           text: msg.text || "",
           reason: msg.reason || null,
           audioUsed: !!msg.audioUsed,
+          ts: msg.ts || Date.now(),
+        });
+      } else if (msg.type === "live-transcribe-reply") {
+        // Pastor 02-jun-2026 · respuesta de la transcripción de voz del HUD.
+        // Vino por la misma WS tras un live-transcribe enviado desde el overlay.
+        // La reenviamos al overlayWindow vía IPC para que ponga el texto en la
+        // cajita del chat (el Pastor revisa y envía).
+        forwardToOverlay("overlay:transcribe-reply", {
+          reqId: msg.reqId || null,
+          ok: !!msg.ok,
+          text: msg.text || "",
+          reason: msg.reason || null,
           ts: msg.ts || Date.now(),
         });
       } else if (msg.type === "midi_config" || msg.type === "midi_out") {
@@ -1574,6 +1728,7 @@ app.whenReady().then(() => {
 
   // Auto-launch on boot — primera vez en TRUE, después respeta el toggle
   ensureAutoLaunchDefault();
+  ensureLabDesktopShortcut();
 
   // Si no hay token al arrancar, abrir ventana de emparejamiento (a menos que
   // hayamos arrancado oculto desde el login item — en ese caso esperamos a
@@ -1584,15 +1739,14 @@ app.whenReady().then(() => {
     openPairingWindow();
   } else if (store.get("token")) {
     connect();
-    // BRIDGE 1.9.1 — Auto-abrir HUD flotante cuando arrancamos NORMAL
-    // (no oculto desde el login item). Esto cubre el caso post-instalador:
-    // NSIS termina con runAfterFinish:true → el Bridge arranca SIN --hidden
-    // → el Pastor ve el HUD aparecer solo, no queda "perdido en el tray".
-    // Si arrancó con --hidden (boot del PC), respetamos y dejamos el tray frío
-    // hasta que el Pastor haga click derecho → Mostrar HUD.
-    if (!launchedHidden) {
-      setTimeout(() => openOverlayWindow(), 800);
-    }
+    // Pastor 02-jun-2026 — El Pastor pidió EXPLÍCITAMENTE que el HUD flotante
+    // se abra SOLO al prender la PC (antes quedaba frío en el tray cuando el
+    // arranque venía del login item con --hidden, y el Pastor no lo encontraba).
+    // Ahora abrimos el HUD SIEMPRE que haya token, tanto en arranque normal
+    // (post-instalador) como en boot del PC (--hidden). Damos un respiro mayor
+    // en boot porque el sistema está cargando otras apps al mismo tiempo.
+    const openDelay = launchedHidden ? 2500 : 800;
+    setTimeout(() => openOverlayWindow(), openDelay);
   }
 
   // Auto-updater desactivado en v1.4.0 (Install Kit v3 — sin GitHub Releases).
