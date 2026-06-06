@@ -1140,6 +1140,32 @@ function openOverlayWindow() {
     else if ((key === "z" && input.shift) || key === "y") { wc.redo(); event.preventDefault(); }
   });
 
+  // Pastor 06-jun-2026 — Menú de CLIC DERECHO en el HUD flotante. El Pastor
+  // selecciona texto del chat y quiere copiarlo (para pegármelo y mostrarme
+  // qué le dijo el Coproductor), pero sin menú contextual el clic derecho no
+  // hace nada. Construimos un menú nativo en español según el contexto:
+  // Copiar si hay selección, Cortar/Pegar solo en campos editables, y siempre
+  // Seleccionar todo. Es la pieza que faltaba además del before-input-event.
+  overlayWindow.webContents.on("context-menu", (event, params) => {
+    const flags = params.editFlags || {};
+    const hasSelection = (params.selectionText || "").trim().length > 0;
+    const template = [];
+    if (hasSelection || params.isEditable) {
+      template.push({ role: "copy", label: "Copiar", enabled: flags.canCopy || hasSelection });
+    }
+    if (params.isEditable) {
+      template.push({ role: "cut", label: "Cortar", enabled: flags.canCut });
+      template.push({ role: "paste", label: "Pegar", enabled: flags.canPaste });
+    }
+    if (template.length) template.push({ type: "separator" });
+    template.push({ role: "selectAll", label: "Seleccionar todo" });
+    try {
+      Menu.buildFromTemplate(template).popup({ window: overlayWindow });
+    } catch (err) {
+      console.warn("[Bridge] context-menu popup falló:", err?.message || err);
+    }
+  });
+
   if (b.compact) overlayWindow.webContents.once("did-finish-load", () => {
     overlayWindow.webContents.executeJavaScript('document.body.classList.add("compact")').catch(() => {});
   });
