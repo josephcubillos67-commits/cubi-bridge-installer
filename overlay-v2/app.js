@@ -803,9 +803,76 @@ function classForLufs(l) {
   if (l >= -16 && l <= -12) return "good";  // ventana streaming
   return null;
 }
+/* Bridge 1.15.0 — Fuente activa / Estado de captura (paridad con overlay v1).
+ * capConnected: WS del Bridge conectada (onStatus).
+ * capSource: {label,mode} reportado por capture.html.
+ * capLastSignalTs: último instante con audio real (rms sobre el piso).
+ *   >2.5s sin señal → "Sin señal" (Cubase sordo / canción parada). Resuelve el
+ *   punto ciego histórico del fallback silencioso a loopback. */
+let capConnected = false;
+let capSource = null;
+let capLastSignalTs = 0;
+let capDisconnectReason = null;
+const CAP_SIGNAL_FLOOR = -55;
+const CAP_SIGNAL_TIMEOUT = 2500;
+// Bridge — Ventana de gracia de reconexión. El proxy de borde de la plataforma
+// recicla la conexión WebSocket cada ~5 min y el Bridge reengancha solo en ~2-3s.
+// Durante ese lapso NO pintamos rojo alarmante: mostramos "Reconectando…" en ámbar.
+// Solo si el corte SUPERA esta ventana se trata como caída real (rojo).
+const CAP_RECONNECT_GRACE = 8000;
+let capDisconnectedAt = 0;
+let capEverConnected = false;
+let capPendingDropMsg = null;
+
+function renderCapStatus() {
+  const dotEl = document.getElementById("cap-status-dot");
+  const stateEl = document.getElementById("cap-status-state");
+  const srcEl = document.getElementById("cap-status-src");
+  if (!dotEl || !stateEl || !srcEl) return;
+
+  const paint = (col) => { dotEl.style.background = col; dotEl.style.color = col; };
+
+  if (!capConnected) {
+    // Corte corto tras una conexión previa = reconexión del hosting, no falla real.
+    const downMs = capDisconnectedAt ? (Date.now() - capDisconnectedAt) : 0;
+    if (capEverConnected && downMs < CAP_RECONNECT_GRACE) {
+      paint("var(--gold)");
+      stateEl.textContent = "Reconectando…";
+      stateEl.style.color = "var(--gold)";
+      srcEl.textContent = "· un momento";
+      return;
+    }
+    paint("var(--red)");
+    stateEl.textContent = "Sin conexión";
+    stateEl.style.color = "var(--red)";
+    srcEl.textContent = capDisconnectReason ? ("· " + capDisconnectReason) : "";
+    return;
+  }
+
+  const src = (capSource && capSource.label) ? capSource.label : "esperando fuente…";
+  const fallback = capSource && capSource.mode === "fallback";
+  const hasSignal = (Date.now() - capLastSignalTs) < CAP_SIGNAL_TIMEOUT;
+
+  if (!hasSignal) {
+    paint("var(--gold)");
+    stateEl.textContent = "Sin señal";
+    stateEl.style.color = "var(--gold)";
+    srcEl.textContent = "· " + src;
+    return;
+  }
+
+  paint(fallback ? "var(--gold)" : "var(--green)");
+  stateEl.textContent = fallback ? "⚠ Loopback" : "Capturando";
+  stateEl.style.color = fallback ? "var(--gold)" : "var(--green)";
+  srcEl.textContent = "· " + src + (fallback ? " (fuente cambió)" : "");
+}
+
 function renderMetrics(m) {
   if (!m) return;
   lastMetricsAt = Date.now();
+  // Bridge 1.15.0 — hay señal real si el cuerpo (rms) supera el piso.
+  if (m.rms != null && isFinite(m.rms) && m.rms > CAP_SIGNAL_FLOOR) capLastSignalTs = Date.now();
+  renderCapStatus();
   setMetricVal("m-lufs", m.lufs, classForLufs(m.lufs));
   setMetricVal("m-tp", m.truePeak, classForTP(m.truePeak));
   setMetricVal("m-rms", m.rms, null);
@@ -1244,18 +1311,64 @@ window.addEventListener("DOMContentLoaded", () => {
 
     // Indicador de status del Bridge en el chat (1 sola vez por cambio)
     if (typeof window.overlayAPI?.onStatus === "function") {
-      let lastStatus = null;
+      let capDropMsgPosted = false; // ¿ya avisamos un corte REAL en el chat?
       window.overlayAPI.onStatus((s) => {
-        if (!s || s.connected === lastStatus) return;
-        lastStatus = s.connected;
-        renderMessage({
-          role: "assistant",
-          text: s.connected
-            ? "🟢 Bridge conectado al estudio."
-            : "🔴 Bridge desconectado. Reconectá desde el tray.",
-        });
+        const nowConnected = !!(s && s.connected);
+        capDisconnectReason = (s && s.reason) || null;
+
+        if (nowConnected) {
+          const wasDown = !capConnected;
+          capConnected = true;
+          capEverConnected = true;
+          capDisconnectedAt = 0;
+          if (capPendingDropMsg) { clearTimeout(capPendingDropMsg); capPendingDropMsg = null; }
+          renderCapStatus();
+          // Solo avisar "reconectado" si antes hubo un corte REAL anunciado
+          // (no por los parpadeos de ~2-3s del reciclaje del hosting).
+          if (wasDown && capDropMsgPosted) {
+            capDropMsgPosted = false;
+            renderMessage({ role: "assistant", text: "🟢 Bridge reconectado al estudio." });
+          }
+          return;
+        }
+
+        if (capConnected) capDisconnectedAt = Date.now(); // momento exacto del corte
+        capConnected = false;
+        renderCapStatus();
+        // No alarmar de inmediato: el hosting recicla la conexión cada ~5 min y
+        // vuelve en ~2-3s. Solo avisar si el corte SUPERA la ventana de gracia.
+        if (!capPendingDropMsg && !capDropMsgPosted) {
+          capPendingDropMsg = setTimeout(() => {
+            capPendingDropMsg = null;
+            if (!capConnected) {
+              capDropMsgPosted = true;
+              renderMessage({
+                role: "assistant",
+                text: "🔴 Bridge desconectado" + (capDisconnectReason ? " — " + capDisconnectReason : "") + ". Reconectá desde el tray.",
+              });
+            }
+          }, CAP_RECONNECT_GRACE);
+        }
       });
     }
+
+    // Bridge 1.15.0 — Fuente activa / Estado de captura en el header del HUD.
+    // Pull inmediato al abrir (última fuente reportada) + updates en vivo.
+    if (typeof window.overlayAPI?.getCaptureSource === "function") {
+      window.overlayAPI.getCaptureSource().then((info) => {
+        if (info) { capSource = info; renderCapStatus(); }
+      }).catch(() => {});
+    }
+    if (typeof window.overlayAPI?.onCaptureSource === "function") {
+      window.overlayAPI.onCaptureSource((info) => {
+        capSource = info || null;
+        renderCapStatus();
+      });
+    }
+    // Si las métricas DEJAN de llegar (captura caída, Cubase mudo), el timeout
+    // de señal hace caer el estado a "Sin señal" aunque renderMetrics no corra.
+    setInterval(renderCapStatus, 1000);
+    renderCapStatus();
   } else {
     // Preview web sin Bridge
     renderMessage({

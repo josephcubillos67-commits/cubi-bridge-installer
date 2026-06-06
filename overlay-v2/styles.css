@@ -1289,3 +1289,37 @@ body[data-state="processing"] .viz-processing {
   margin-bottom: 8px;
   line-height: 1.35;
 }
+
+/* ── Bridge 1.15.0 — Fuente activa / Estado de captura ────────────────
+ * Línea fina bajo el header: qué escucha el HUD AHORA y si llega señal.
+ * Resuelve el punto ciego del fallback silencioso a loopback (Cubase sordo).
+ * ADN CUBI: sin jerga; nombre del device + estado claro (verde/oro/rojo). */
+#cap-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 14px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.12);
+  white-space: nowrap;
+  overflow: hidden;
+  flex: none;
+}
+#cap-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold-dim);
+  color: var(--gold-dim);
+  flex: none;
+  box-shadow: 0 0 6px currentColor;
+}
+#cap-status-state { font-weight: 600; flex: none; }
+#cap-status-src {
+  color: #9aa0a6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+[data-mode="compact"] #cap-status { display: none; }

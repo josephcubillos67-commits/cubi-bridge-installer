@@ -69,6 +69,15 @@
       </div>
     </header>
 
+    <!-- Bridge 1.15.0 — Fuente activa / Estado de captura.
+         Qué escucha el HUD AHORA y si llega señal. Verde=Capturando,
+         Oro=Sin señal / Loopback, Rojo=Sin conexión. READ-ONLY. -->
+    <div id="cap-status" title="Fuente de audio que el HUD está escuchando ahora mismo">
+      <span id="cap-status-dot" aria-hidden="true"></span>
+      <span id="cap-status-state">Iniciando…</span>
+      <span id="cap-status-src"></span>
+    </div>
+
     <!-- METRICS STRIP: ingeniero de mastering en vivo -->
     <!-- Pastor 26-may-2026: fusión del HUD técnico viejo dentro del Jarvis nuevo.
          Arriba métricas reales del master (LUFS/Pico/Cuerpo/Dinámica) + tendencia 60s + 8 bandas.

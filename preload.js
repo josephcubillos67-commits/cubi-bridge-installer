@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld("bridgeAPI", {
   sendMetrics: (metrics) => ipcRenderer.send("bridge:metrics", metrics),
   reportCaptureError: (msg) => ipcRenderer.send("bridge:capture-error", msg),
 
+  // Bridge 1.15.0 — fuente de audio activa real (label del track + modo de
+  // captura). El HUD la muestra como "Fuente activa" y delata el fallback
+  // silencioso a loopback que era el punto ciego de las reconexiones.
+  reportCaptureSource: (info) => ipcRenderer.send("bridge:capture-source", info),
+
   // Bridge 1.10.0 — Audio device picker
   // getAudioConfig: lee {deviceId,label} persistidos en electron-store
   // reportAudioInputs: publica enumerateDevices() al main para poblar tray submenu
@@ -58,6 +63,15 @@ contextBridge.exposeInMainWorld("overlayAPI", {
     const handler = (_e, s) => cb(s);
     ipcRenderer.on("overlay:status", handler);
     return () => ipcRenderer.removeListener("overlay:status", handler);
+  },
+  // Bridge 1.15.0 — Fuente activa / Estado de captura.
+  // getCaptureSource: pull inmediato al abrir el HUD (la última fuente que
+  // reportó capture.html). onCaptureSource: actualizaciones en vivo.
+  getCaptureSource: () => ipcRenderer.invoke("overlay:get-capture-source"),
+  onCaptureSource: (cb) => {
+    const handler = (_e, info) => cb(info);
+    ipcRenderer.on("overlay:capture-source", handler);
+    return () => ipcRenderer.removeListener("overlay:capture-source", handler);
   },
   // Bridge 1.9.0 — perfil musical en vivo desde capture.html (cada 2s)
   onMusicProfile: (cb) => {

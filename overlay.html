@@ -82,6 +82,29 @@
       transition: all 0.15s;
     }
     .hdr-btn:hover { color: var(--text); border-color: var(--gold); }
+    /* Bridge 1.15.0 — Fuente activa / Estado de captura.
+     * Línea fina bajo el header: qué está escuchando el HUD AHORA y si llega
+     * señal. Resuelve el punto ciego histórico (fallback silencioso a loopback,
+     * Cubase sordo). ADN CUBI: sin jerga; el nombre del device + estado claro. */
+    #capstatus {
+      display: flex; align-items: center; gap: 5px;
+      padding: 3px 9px;
+      font-size: 9px; letter-spacing: 0.03em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      white-space: nowrap; overflow: hidden;
+    }
+    #capstatus-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+    }
+    #capstatus-state { font-weight: 600; flex-shrink: 0; }
+    #capstatus-src {
+      color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    body.compact #capstatus { display: none; }
     /* Cuerpo */
     #body { padding: 8px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; flex: 1; }
     /* Métricas */
@@ -209,11 +232,17 @@
       <button class="hdr-btn" id="btn-compact" title="Modo compacto / expandido">◐</button>
       <button class="hdr-btn" id="btn-close" title="Ocultar HUD">×</button>
     </div>
+    <div id="capstatus" title="Fuente que el HUD está escuchando ahora mismo">
+      <span id="capstatus-dot"></span>
+      <span id="capstatus-state">Iniciando…</span>
+      <span id="capstatus-src"></span>
+    </div>
     <div id="body">
       <div class="metrics-grid">
         <div class="metric metric-primary">
-          <div class="metric-label">Volumen</div>
+          <div class="metric-label">Volumen ahora</div>
           <div class="metric-value" id="m-lufs" style="color: var(--green);">—<span class="metric-unit">LUFS</span></div>
+          <div id="m-lufs-int" style="font-size:9px;letter-spacing:0.03em;color:var(--gold);opacity:0.9;margin-top:1px;white-space:nowrap;">canción —</div>
         </div>
         <div class="metric">
           <div class="metric-label">Pico</div>
@@ -267,6 +296,53 @@
     let latestObs = null;
     let latestPlugins = null;
 
+    /* ─── Fuente activa / Estado de captura (Bridge 1.15.0) ──────
+     * captureConnected: ¿la WS del Bridge está conectada? (onStatus)
+     * captureSource: {label, mode} reportado por capture.html.
+     * lastSignalTs: último instante con audio real (rms por encima del piso).
+     *   Si pasan >2.5s sin señal → "Sin señal" (Cubase sordo / canción parada).
+     * El umbral -55 dB separa música real del ruido de piso de un loopback mudo. */
+    let captureConnected = false;
+    let captureSource = null;
+    let lastSignalTs = 0;
+    let captureDisconnectReason = null;
+    const SIGNAL_FLOOR_DB = -55;
+    const SIGNAL_TIMEOUT_MS = 2500;
+
+    function renderCapStatus() {
+      const dotEl = $("capstatus-dot");
+      const stateEl = $("capstatus-state");
+      const srcEl = $("capstatus-src");
+      if (!dotEl || !stateEl || !srcEl) return;
+
+      if (!captureConnected) {
+        dotEl.style.background = "var(--red)";
+        stateEl.textContent = "Sin conexión";
+        stateEl.style.color = "var(--red)";
+        srcEl.textContent = captureDisconnectReason ? ("· " + captureDisconnectReason) : "";
+        return;
+      }
+
+      const src = (captureSource && captureSource.label) ? captureSource.label : "esperando fuente…";
+      const fallback = captureSource && captureSource.mode === "fallback";
+      const hasSignal = (Date.now() - lastSignalTs) < SIGNAL_TIMEOUT_MS;
+
+      if (!hasSignal) {
+        dotEl.style.background = "var(--yellow)";
+        stateEl.textContent = "Sin señal";
+        stateEl.style.color = "var(--yellow)";
+        srcEl.textContent = "· " + src;
+        srcEl.style.color = "var(--yellow)";
+        return;
+      }
+
+      dotEl.style.background = "var(--green)";
+      stateEl.textContent = fallback ? "⚠ Loopback" : "Capturando";
+      stateEl.style.color = fallback ? "var(--yellow)" : "var(--green)";
+      srcEl.textContent = "· " + src + (fallback ? " (fuente cambió)" : "");
+      srcEl.style.color = "var(--muted)";
+    }
+
     /* ─── Helpers de render ──────────────────────────────────── */
     const $ = (id) => document.getElementById(id);
 
@@ -292,7 +368,19 @@
 
     function renderMetrics(m) {
       if (!m) return;
+      // Bridge 1.15.0 — hay señal real si el cuerpo (rms) supera el piso.
+      // Esto alimenta el indicador "Capturando / Sin señal" del header.
+      if (m.rms != null && isFinite(m.rms) && m.rms > SIGNAL_FLOOR_DB) {
+        lastSignalTs = Date.now();
+      }
+      renderCapStatus();
       setMetric("m-lufs", m.lufs);
+      const intEl = $("m-lufs-int");
+      if (intEl) {
+        intEl.textContent = (m.lufsIntegrated != null && isFinite(m.lufsIntegrated))
+          ? "canción " + m.lufsIntegrated.toFixed(1) + " LUFS"
+          : "canción —";
+      }
       setMetric("m-tp", m.truePeak);
       $("m-tp").style.color = colorTP(m.truePeak);
       setMetric("m-rms", m.rms);
@@ -437,7 +525,27 @@
       window.overlayAPI.onStatus((s) => {
         $("dot").style.background = s?.connected ? "var(--green)" : "var(--red)";
         $("title").textContent = s?.connected ? "CUBI · Estudio en vivo" : "CUBI · Sin conexión";
+        captureConnected = !!s?.connected;
+        captureDisconnectReason = (s && s.reason) || null;
+        renderCapStatus();
       });
+      // Bridge 1.15.0 — Fuente activa: pull inmediato al abrir + updates en vivo.
+      if (window.overlayAPI.getCaptureSource) {
+        window.overlayAPI.getCaptureSource().then((info) => {
+          if (info) { captureSource = info; renderCapStatus(); }
+        }).catch(() => {});
+      }
+      if (window.overlayAPI.onCaptureSource) {
+        window.overlayAPI.onCaptureSource((info) => {
+          captureSource = info || null;
+          renderCapStatus();
+        });
+      }
+      // Refresco periódico: si las métricas DEJAN de llegar (captura caída,
+      // Cubase mudo), el timeout de señal hace caer el estado a "Sin señal"
+      // aunque renderMetrics ya no se dispare.
+      setInterval(renderCapStatus, 1000);
+      renderCapStatus();
     }
 
     $("btn-compact").addEventListener("click", () => {

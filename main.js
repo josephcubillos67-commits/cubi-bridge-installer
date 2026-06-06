@@ -206,6 +206,24 @@ function makeTrayIcon(color) {
 
 let currentTrayState = "disconnected";
 
+// Bridge 1.15.0 — último motivo de desconexión, en español, para que el HUD
+// muestre POR QUÉ se cortó (reemplazado / red / token / timeout) en vez de un
+// 🔴 mudo. Se limpia al reconectar (ws.on("open")).
+let lastDisconnectReason = null;
+
+function humanDisconnectReason(code, reasonStr) {
+  const r = (reasonStr || "").toLowerCase();
+  if (r.includes("replaced")) return "Otra instancia tomó tu conexión (¿el Bridge quedó abierto dos veces o en otra PC?)";
+  if (r.includes("revoked")) return "Acceso revocado desde la web — volvé a emparejar";
+  if (r.includes("invalid token")) return "Token inválido — volvé a emparejar";
+  if (r.includes("missing token")) return "Falta el token — volvé a emparejar";
+  if (r.includes("timeout")) return "El servidor dejó de recibir tu señal (timeout)";
+  if (code === 1006) return "Se cortó la red o el servidor (cierre abrupto)";
+  if (code === 1001) return "El servidor se está reiniciando";
+  if (reasonStr) return reasonStr.slice(0, 200);
+  return "Motivo desconocido (código " + code + ")";
+}
+
 // Bridge 1.10.0 — audio inputs reportados por capture.html (post-permiso).
 // El submenu "🎤 Fuente de audio" se construye desde este cache.
 let cachedAudioInputs = [];
@@ -215,7 +233,13 @@ function updateTrayState(state /* "connected" | "disconnected" | "paused" | "pai
   const prevState = currentTrayState;
   currentTrayState = state;
   // Mantener el overlay al tanto del estado de conexión (punto verde/rojo)
-  forwardToOverlay("overlay:status", { connected: state === "connected" });
+  // Bridge 1.15.0 — adjuntamos el motivo del corte para que el HUD lo muestre.
+  // Solo el corte real ("disconnected") lleva motivo; pausa/emparejamiento no
+  // son cortes, así no queda un motivo viejo "pegado" en esos estados.
+  forwardToOverlay("overlay:status", {
+    connected: state === "connected",
+    reason: state === "disconnected" ? lastDisconnectReason : null,
+  });
 
   // AUTO-OPEN del HUD la primera vez que el Pastor se conecta tras emparejar.
   // El Pastor no debería tener que cazar el ícono del tray para encontrar el
@@ -625,6 +649,18 @@ ipcMain.on("bridge:metrics", (_event, metrics) => {
   }
   forwardToOverlay("overlay:metrics", metrics);
 });
+
+// Bridge 1.15.0 — Fuente activa / Estado de captura.
+// capture.html reporta qué device está escuchando de verdad (label del track)
+// y en qué modo (chosen/fallback/loopback). Lo guardamos para que un HUD que
+// se abre después pueda pedirlo (overlay:get-capture-source) y lo reenviamos
+// en vivo. READ-ONLY local — nunca va al server.
+let lastCaptureSource = null;
+ipcMain.on("bridge:capture-source", (_event, info) => {
+  lastCaptureSource = info || null;
+  forwardToOverlay("overlay:capture-source", lastCaptureSource);
+});
+ipcMain.handle("overlay:get-capture-source", () => lastCaptureSource);
 
 // Bridge 1.9.0 — perfil musical (BPM/key/tempo/groove/energy/dinámica/crescendo)
 // READ-ONLY local: solo va al overlay. NO se manda al server (cero coste de red
@@ -1231,6 +1267,7 @@ function connect() {
     console.log("[Bridge] WebSocket abierto");
     reconnectDelay = RECONNECT_BASE_MS;
     captureRestartCount = 0;
+    lastDisconnectReason = null; // reconectado: limpiar el motivo del corte
     updateTrayState("connected");
     // CP5 — wire del canal WRITE (MIDI OUT). OFF por defecto hasta
     // que el server mande midi_config{enabled:true} desde /lab.
@@ -1354,6 +1391,7 @@ function connect() {
   ws.on("close", (code, reason) => {
     const reasonStr = reason ? reason.toString() : "";
     console.log(`[Bridge] WebSocket cerrado (${code} ${reasonStr})`);
+    lastDisconnectReason = humanDisconnectReason(code, reasonStr);
     clearInterval(pingTimer);
     pingTimer = null;
     clearInterval(telemetryTimer);

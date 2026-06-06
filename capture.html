@@ -121,6 +121,13 @@
     // VAIO/AUX, B1/B2, loop físico, etc.) si el Pastor lo eligió desde el tray
     // menu. Sin elección guardada → WASAPI loopback del default de Windows
     // (comportamiento pre-1.10, compat total).
+    // Bridge 1.15.0 — modo de captura activo, para que el HUD muestre la fuente
+    // real y avise cuando cae a loopback por fallback silencioso.
+    //   "chosen"   = device elegido por el Pastor (tray/HUD) funcionando.
+    //   "fallback" = el device elegido falló → cayó a loopback (el punto ciego).
+    //   "loopback" = sin elección guardada → WASAPI loopback del default.
+    let captureMode = "loopback";
+
     async function getStream() {
       let cfg = null;
       try { cfg = await window.bridgeAPI.getAudioConfig(); } catch {}
@@ -130,7 +137,7 @@
           // No forzamos sampleRate/channelCount — algunos devices (Focusrite
           // 44.1k locked, mono-mic) tirarían OverconstrainedError sin razón.
           // El audio se resamplea automáticamente al sampleRate del AudioContext.
-          return await navigator.mediaDevices.getUserMedia({
+          const s = await navigator.mediaDevices.getUserMedia({
             audio: {
               deviceId: { exact: cfg.deviceId },
               echoCancellation: false,
@@ -138,13 +145,17 @@
               autoGainControl: false,
             },
           });
+          captureMode = "chosen";
+          return s;
         } catch (e) {
           // Device desconectado / nombre cambiado: fallback a loopback y log.
           // NO limpiamos el store — Pastor decide reelegir desde el tray.
           log("Device '" + (cfg.label || cfg.deviceId) + "' no disponible (" + e.name + "). Volviendo a loopback.");
+          captureMode = "fallback";
         }
       } else {
         log("Captura desde default del sistema (WASAPI loopback)");
+        captureMode = "loopback";
       }
       return await navigator.mediaDevices.getDisplayMedia({
         video: { width: 1, height: 1, frameRate: 1 },
@@ -178,6 +189,18 @@
           return;
         }
         log("Audio capturado: " + audioTracks[0].label);
+        // Bridge 1.15.0 — reportar la fuente activa real al HUD (Fuente activa /
+        // Estado de captura). El label del track es lo que de verdad se está
+        // escuchando; el modo delata el fallback silencioso a loopback.
+        try {
+          const fallbackLabel = captureMode === "loopback"
+            ? "Default del sistema (loopback)"
+            : "Fuente de audio";
+          window.bridgeAPI.reportCaptureSource({
+            label: audioTracks[0].label || fallbackLabel,
+            mode: captureMode,
+          });
+        } catch {}
         stream.getVideoTracks().forEach((t) => t.stop());
         // Poblar tray menu con la lista real de devices (ahora que hay permiso)
         publishAudioInputs();
@@ -229,6 +252,19 @@
         // Se pondera por duración para que la integración sea exacta.
         // ────────────────────────────────────────────────────────────────
         const lufsBlocks = []; // [{meanSq, durSec}]
+        // ─── LUFS INTEGRATED (BS.1770 gated, acumulado desde play) ──────
+        // Cada tick aporta UNA vez su bloque K-weighted nuevo → cobertura
+        // contigua de TODO el stream desde que el Pastor le dio play. Gating
+        // de 2 pasos (absoluto -70 LUFS + relativo -10 LU), ponderado por
+        // duración. Aprox práctica del integrated de RX (bloques por tick ~500ms,
+        // no 400ms/75% overlap normativos) — muy cercano, no lab-grade.
+        // Se resetea tras ~5s de silencio sostenido (la canción terminó / hubo
+        // stop) para que el integrated sea POR CANCIÓN, no del set entero.
+        const integratedBlocks = []; // [{meanSq, durSec}] sobre gate absoluto — ponderado por duración
+        let integratedSilentMs = 0;
+        const INTEGRATED_SILENCE_RESET_MS = 5000;
+        const ABS_GATE_LUFS = -70;
+        const MAX_INTEGRATED_BLOCKS = 6000; // ~50 min @ 2 ticks/s — tope de memoria
         let peakHold = 0;
         let lastTickTime = performance.now();
 
@@ -286,6 +322,35 @@
           const integratedMeanSq = totalDur > 0 ? weightedSum / totalDur : 0;
           const lufs = integratedMeanSq > 0 ? -0.691 + 10 * Math.log10(integratedMeanSq) : -Infinity;
 
+          // ─── LUFS INTEGRATED (gated BS.1770, desde play) ─────────
+          // Reusa blockMeanSq (el bloque K-weighted NUEVO de esta tick).
+          const blockLufs = blockMeanSq > 0 ? -0.691 + 10 * Math.log10(blockMeanSq) : -Infinity;
+          if (blockLufs >= ABS_GATE_LUFS) {
+            integratedBlocks.push({ meanSq: blockMeanSq, durSec: tickDurSec });
+            if (integratedBlocks.length > MAX_INTEGRATED_BLOCKS) integratedBlocks.shift();
+            integratedSilentMs = 0;
+          } else {
+            integratedSilentMs += tickDurSec * 1000;
+            if (integratedSilentMs >= INTEGRATED_SILENCE_RESET_MS) integratedBlocks.length = 0;
+          }
+          let lufsIntegrated = -Infinity;
+          if (integratedBlocks.length > 0) {
+            // Paso 1 — gate absoluto ya aplicado al pushear. Media de potencia
+            // PONDERADA POR DURACIÓN (los ticks tienen jitter → no promediar por conteo).
+            let absW = 0, absDur = 0;
+            for (const b of integratedBlocks) { absW += b.meanSq * b.durSec; absDur += b.durSec; }
+            const absMean = absDur > 0 ? absW / absDur : 0;
+            const absLufs = absMean > 0 ? -0.691 + 10 * Math.log10(absMean) : -Infinity;
+            // Paso 2 — gate relativo a -10 LU del nivel absoluto (también ponderado).
+            const relThresh = absLufs - 10;
+            let relW = 0, relDur = 0;
+            for (const b of integratedBlocks) {
+              const bl = b.meanSq > 0 ? -0.691 + 10 * Math.log10(b.meanSq) : -Infinity;
+              if (bl >= relThresh) { relW += b.meanSq * b.durSec; relDur += b.durSec; }
+            }
+            lufsIntegrated = relDur > 0 ? -0.691 + 10 * Math.log10(relW / relDur) : absLufs;
+          }
+
           // ─── RMS-300ms deslizante (FIX #2) ───────────────────────
           rawAnalyser.getFloatTimeDomainData(rawTime);
           const rmsStart = FFT_SIZE - rmsWindowSamples;
@@ -318,6 +383,7 @@
 
           const metrics = {
             lufs: isFinite(lufs) ? lufs : null,
+            lufsIntegrated: isFinite(lufsIntegrated) ? lufsIntegrated : null,
             truePeak: isFinite(peakDb) ? peakDb : null,
             rms: isFinite(rmsDb) ? rmsDb : null,
             crest: crestDb,
