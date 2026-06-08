@@ -242,6 +242,44 @@
         rawAnalyser.smoothingTimeConstant = 0;
         source.connect(rawAnalyser);
 
+        // ────────────────────────────────────────────────────────────────
+        // BRIDGE — Captura PCM cruda para clip on-demand (CAMINO ROBUSTO)
+        // ────────────────────────────────────────────────────────────────
+        // El MediaRecorder (más abajo) a veces entrega chunks VACÍOS sobre el
+        // loopback de Windows → el clip vuelve "no-buffer" aunque el MEDIDOR
+        // sí reciba señal. Para que el clip sea TAN confiable como el medidor,
+        // grabamos el MISMO PCM que el analyser ya recibe en un ring buffer y
+        // lo encodeamos a WAV bajo demanda (sin codec, determinístico). Misma
+        // fuente que el medidor = si hay señal en el HUD, hay clip.
+        const PCM_BUFFER_SEC = 18;
+        const pcmRingLen = Math.ceil(PCM_BUFFER_SEC * sampleRate);
+        const pcmRing = new Float32Array(pcmRingLen);
+        let pcmWrite = 0;
+        let pcmFilled = 0;
+        let pcmCaptureActive = false;
+        try {
+          const pcmTap = audioCtx.createScriptProcessor(4096, 1, 1);
+          pcmTap.onaudioprocess = (ev) => {
+            const inBuf = ev.inputBuffer.getChannelData(0);
+            for (let i = 0; i < inBuf.length; i++) {
+              pcmRing[pcmWrite] = inBuf[i];
+              pcmWrite = (pcmWrite + 1) % pcmRingLen;
+            }
+            if (pcmFilled < pcmRingLen) pcmFilled = Math.min(pcmRingLen, pcmFilled + inBuf.length);
+          };
+          // El ScriptProcessor solo dispara onaudioprocess si su salida llega a
+          // destination. Gain 0 = no reinyecta audio (sin eco ni salida real).
+          const pcmSink = audioCtx.createGain();
+          pcmSink.gain.value = 0;
+          source.connect(pcmTap);
+          pcmTap.connect(pcmSink);
+          pcmSink.connect(audioCtx.destination);
+          pcmCaptureActive = true;
+          log("Captura PCM robusta activa (" + PCM_BUFFER_SEC + "s ring @ " + sampleRate + "Hz, mono).");
+        } catch (e) {
+          log("WARN: captura PCM no disponible, uso MediaRecorder: " + (e && e.message));
+        }
+
         const kTime = new Float32Array(FFT_SIZE);
         const kFreq = new Float32Array(kAnalyser.frequencyBinCount);
         const rawTime = new Float32Array(FFT_SIZE);
@@ -727,10 +765,78 @@
           log("WARN: MediaRecorder no disponible (Gemini Audio off): " + e.message);
         }
 
+        // ── WAV 16-bit mono @ 16 kHz desde el ring PCM (camino primario) ──
+        // Resampleamos a 16 kHz (Gemini Audio resamplea a 16k igual, no se pierde
+        // nada útil) por DOS razones duras: (1) el server rechaza clips > ~600KB
+        // — a 48kHz un clip de 10s pesa ~960KB y se descartaría; a 16kHz pesa
+        // ~320KB y entra holgado; (2) cabe en el timeout de 4s del server.
+        // El resampleo es por PROMEDIO de bloque (decimación con lowpass crudo):
+        // suaviza el aliasing al bajar de tasa mejor que tomar 1 de cada N.
+        const CLIP_TARGET_SR = 16000;
+        function buildWavFromRing(seconds) {
+          if (!pcmCaptureActive || pcmFilled <= 0) return null;
+          const srcCount = Math.min(pcmFilled, Math.ceil(seconds * sampleRate));
+          if (srcCount <= 0) return null;
+          let start = (pcmWrite - srcCount) % pcmRingLen; if (start < 0) start += pcmRingLen;
+          const ratio = sampleRate / CLIP_TARGET_SR;
+          const outCount = Math.max(1, Math.floor(srcCount / ratio));
+          const dataLen = outCount * 2;
+          const ab = new ArrayBuffer(44 + dataLen);
+          const dv = new DataView(ab);
+          const wstr = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+          wstr(0, "RIFF"); dv.setUint32(4, 36 + dataLen, true); wstr(8, "WAVE");
+          wstr(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+          dv.setUint32(24, CLIP_TARGET_SR, true); dv.setUint32(28, CLIP_TARGET_SR * 2, true);
+          dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+          wstr(36, "data"); dv.setUint32(40, dataLen, true);
+          let off = 44;
+          for (let i = 0; i < outCount; i++) {
+            const from = Math.floor(i * ratio);
+            const to = Math.min(srcCount, Math.max(from + 1, Math.floor((i + 1) * ratio)));
+            let sum = 0, n = 0;
+            for (let j = from; j < to; j++) { sum += pcmRing[(start + j) % pcmRingLen]; n++; }
+            let v = n > 0 ? sum / n : 0;
+            v = v < -1 ? -1 : v > 1 ? 1 : v;
+            dv.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
+            off += 2;
+          }
+          return { ab, samples: outCount, targetSr: CLIP_TARGET_SR };
+        }
+
+        function b64FromBytes(bytes) {
+          let bin = ""; const CH = 0x8000;
+          for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+          return btoa(bin);
+        }
+
         window.bridgeAPI.onAudioClipRequest(async (req) => {
           const reqId = req && req.clipReqId;
           const durationSec = Math.min(15, Math.max(3, (req && req.durationSec) || 10));
           if (!reqId) return;
+
+          // CAMINO PRIMARIO (robusto): WAV desde el MISMO PCM que el medidor ya
+          // recibe. Si el HUD muestra señal, este clip SIEMPRE sale — a diferencia
+          // del MediaRecorder, que sobre el loopback de Windows a veces devuelve
+          // chunks vacíos ("no-buffer"). Pedimos ≥0.5s acumulados para evitar
+          // mandar un clip demasiado corto al arrancar.
+          if (pcmCaptureActive && pcmFilled > sampleRate * 0.5) {
+            try {
+              const wav = buildWavFromRing(durationSec);
+              if (wav && wav.ab.byteLength > 44) {
+                const base64 = b64FromBytes(new Uint8Array(wav.ab));
+                window.bridgeAPI.sendAudioClip({
+                  clipReqId: reqId, ok: true, base64, mimeType: "audio/wav",
+                  durationSec: Math.round(wav.samples / wav.targetSr), sizeBytes: wav.ab.byteLength,
+                });
+                log("Clip vía PCM→WAV " + (wav.targetSr / 1000) + "kHz: " + Math.round(wav.samples / wav.targetSr) + "s, " + Math.round(wav.ab.byteLength / 1024) + "KB.");
+                return;
+              }
+            } catch (err) {
+              log("PCM→WAV falló (" + (err && err.message) + "), intento MediaRecorder.");
+            }
+          }
+
+          // FALLBACK: MediaRecorder Opus/WebM (comportamiento previo)
           if (!recorder || audioChunks.length === 0) {
             window.bridgeAPI.sendAudioClip({ clipReqId: reqId, ok: false, reason: "no-buffer" });
             return;
