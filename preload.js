@@ -201,6 +201,9 @@ contextBridge.exposeInMainWorld("overlayAPI", {
           // (app.js lo usa para mostrar marcador 🎧 cuando el cerebro
           // realmente escuchó los últimos ~10s del master).
           audioUsed: !!payload.audioUsed,
+          // 4-ago-26 · Manos del HUD: propuesta estructurada validada por el
+          // server (o null). app.js la pinta como tarjeta Aplicar/Deshacer.
+          proposal: payload.proposal || null,
         });
       };
       const timer = setTimeout(() => {
@@ -209,6 +212,32 @@ contextBridge.exposeInMainWorld("overlayAPI", {
       }, TIMEOUT_MS);
       ipcRenderer.on("overlay:live-reply", handler);
       ipcRenderer.send("overlay:send-live-message", { reqId, text });
+    });
+  },
+  // 4-ago-26 · Manos del HUD: ejecutar/deshacer una propuesta aprobada.
+  // Mismo patrón reqId/reply que sendLiveMessage; viaja por la WS autenticada
+  // del Bridge (el overlay file:// no tiene cookies — hud-style-tag-transport).
+  applyMacro: ({ action, macro, value }) => {
+    const reqId = `apply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve) => {
+      const TIMEOUT_MS = 15_000;
+      const handler = (_e, payload) => {
+        if (!payload || payload.reqId !== reqId) return;
+        ipcRenderer.removeListener("overlay:apply-macro-reply", handler);
+        clearTimeout(timer);
+        resolve(payload);
+      };
+      const timer = setTimeout(() => {
+        ipcRenderer.removeListener("overlay:apply-macro-reply", handler);
+        resolve({ ok: false, error: "Sin respuesta del servidor (timeout)." });
+      }, TIMEOUT_MS);
+      ipcRenderer.on("overlay:apply-macro-reply", handler);
+      ipcRenderer.send("overlay:apply-macro", {
+        reqId,
+        action: action === "undo_macro" ? "undo_macro" : "set_macro",
+        macro: String(macro || ""),
+        value: typeof value === "number" ? value : undefined,
+      });
     });
   },
   // Para mensajes broadcast (no correlacionados) — útil si el server empuja

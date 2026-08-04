@@ -71,6 +71,8 @@ window.jarvisAPI = {
           // 1.8.0 — true si el cerebro escuchó los últimos 10s reales del master
           // (Gemini Audio multimodal). app.js lo usa para mostrar el marcador 🎧.
           _audioUsed: !!res?.audioUsed,
+          // 4-ago-26 · Manos del HUD: propuesta validada por el server (o null).
+          proposal: res?.proposal || null,
         };
       } catch (e) {
         return {

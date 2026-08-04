@@ -170,6 +170,130 @@ function renderMessage({ role, text, actions = [], severity = null }) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+/* ============================================================
+ * MANOS DEL HUD — tarjeta de propuesta (4-ago-26)
+ * Doble consentimiento: el cerebro propone, el Pastor aprueba,
+ * recién ahí viaja el MIDI por la WS del Bridge (apply-macro).
+ * ============================================================ */
+const MACRO_LABELS = {
+  vocal_reverb: "Reverb de la voz",
+  vocal_presence: "Presencia de la voz",
+  vocal_air: "Aire de la voz",
+  kick_punch: "Pegada del bombo",
+  glue_compression: "Compresión de pegamento",
+  master_width: "Ancho del master",
+};
+
+function renderProposalCard(proposal) {
+  const canApply = typeof window.overlayAPI?.applyMacro === "function";
+  const card = document.createElement("div");
+  card.className = "proposal-card";
+
+  const title = document.createElement("div");
+  title.className = "proposal-title";
+  title.textContent = `🎚 ${MACRO_LABELS[proposal.macro] || proposal.macro} → ${Math.round(proposal.valor * 100)}%`;
+  card.appendChild(title);
+
+  if (proposal.razon) {
+    const reason = document.createElement("div");
+    reason.className = "proposal-reason";
+    reason.textContent = proposal.razon;
+    card.appendChild(reason);
+  }
+
+  if (proposal.receta && proposal.receta.herramienta) {
+    const receta = document.createElement("div");
+    receta.className = "proposal-receta";
+    receta.textContent = `En su DAW: ${proposal.receta.herramienta} → ${proposal.receta.control}${proposal.receta.ajuste ? " — " + proposal.receta.ajuste : ""}`;
+    card.appendChild(receta);
+  }
+
+  const statusEl = document.createElement("div");
+  statusEl.className = "proposal-status";
+
+  const row = document.createElement("div");
+  row.className = "proposal-buttons";
+
+  const btnApply = document.createElement("button");
+  btnApply.className = "proposal-btn apply";
+  btnApply.textContent = "Aplicar";
+
+  const btnDismiss = document.createElement("button");
+  btnDismiss.className = "proposal-btn dismiss";
+  btnDismiss.textContent = "Dejar así";
+
+  const btnUndo = document.createElement("button");
+  btnUndo.className = "proposal-btn undo";
+  btnUndo.textContent = "Deshacer";
+  btnUndo.style.display = "none";
+
+  btnDismiss.addEventListener("click", () => {
+    card.classList.add("resolved");
+    row.remove();
+    statusEl.textContent = "Descartada — no se movió nada.";
+    card.appendChild(statusEl);
+  });
+
+  btnApply.addEventListener("click", async () => {
+    if (!canApply) {
+      statusEl.textContent = "Actualizá el Bridge para aplicar desde el HUD.";
+      card.appendChild(statusEl);
+      return;
+    }
+    btnApply.disabled = true;
+    btnDismiss.disabled = true;
+    statusEl.textContent = "Aplicando…";
+    card.appendChild(statusEl);
+    const res = await window.overlayAPI.applyMacro({
+      action: "set_macro",
+      macro: proposal.macro,
+      value: proposal.valor,
+    });
+    if (res && res.ok) {
+      card.classList.add("applied");
+      statusEl.textContent = res.midiSent
+        ? "✅ Perilla movida (MIDI enviado)."
+        : `✅ Registrada. MIDI no viajó (${res.midiReason === "midi_out_disabled" ? "MIDI OUT apagado en /lab" : res.midiReason || "sin puerto"}).`;
+      btnApply.style.display = "none";
+      btnDismiss.style.display = "none";
+      if (res.canUndo) {
+        btnUndo.style.display = "";
+        btnUndo.disabled = false;
+      }
+    } else {
+      statusEl.textContent = `⚠️ No se pudo aplicar: ${res?.error || "error desconocido"}.`;
+      btnApply.disabled = false;
+      btnDismiss.disabled = false;
+    }
+  });
+
+  btnUndo.addEventListener("click", async () => {
+    btnUndo.disabled = true;
+    statusEl.textContent = "Deshaciendo…";
+    const res = await window.overlayAPI.applyMacro({
+      action: "undo_macro",
+      macro: proposal.macro,
+    });
+    if (res && res.ok) {
+      card.classList.remove("applied");
+      card.classList.add("resolved");
+      statusEl.textContent = "↩️ Deshecho — la perilla volvió a su valor anterior.";
+      btnUndo.style.display = "none";
+    } else {
+      statusEl.textContent = `⚠️ No se pudo deshacer: ${res?.error || "error desconocido"}.`;
+      btnUndo.disabled = false;
+    }
+  });
+
+  row.appendChild(btnApply);
+  row.appendChild(btnDismiss);
+  row.appendChild(btnUndo);
+  card.appendChild(row);
+
+  chatLog.appendChild(card);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
 function renderTyping() {
   const msg = document.createElement("div");
   msg.className = "msg assistant";
@@ -230,6 +354,11 @@ async function sendUserMessage() {
       text: prefix + response.reply,
       actions: response.actions,
     });
+    // 4-ago-26 · Manos del HUD: si el cerebro emitió una propuesta de acción
+    // validada, pintamos la tarjeta de doble consentimiento bajo la respuesta.
+    if (response.proposal && response.proposal.macro) {
+      renderProposalCard(response.proposal);
+    }
   } catch (err) {
     removeTyping();
     setVisual("error", { autoRevert: 3000 });

@@ -776,6 +776,36 @@ ipcMain.on("overlay:reset-conversation", (_event, payload) => {
   }
 });
 
+// 4-ago-26 · Manos del HUD: el Pastor aprobó (o deshace) una tarjeta de
+// propuesta. Reenviamos por la WS autenticada; la respuesta vuelve como
+// apply-macro-reply y se forwardea al overlay más abajo.
+ipcMain.on("overlay:apply-macro", (_event, payload) => {
+  try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      forwardToOverlay("overlay:apply-macro-reply", {
+        reqId: payload?.reqId || null,
+        ok: false,
+        error: "Bridge desconectado. Reconectá desde el tray.",
+      });
+      return;
+    }
+    ws.send(JSON.stringify({
+      type: "apply-macro",
+      reqId: String(payload?.reqId || `apply-${Date.now()}`),
+      action: payload?.action === "undo_macro" ? "undo_macro" : "set_macro",
+      macro: String(payload?.macro || "").slice(0, 64),
+      value: typeof payload?.value === "number" ? payload.value : undefined,
+    }));
+  } catch (e) {
+    console.error("[Bridge] overlay:apply-macro falló:", e?.message || e);
+    forwardToOverlay("overlay:apply-macro-reply", {
+      reqId: payload?.reqId || null,
+      ok: false,
+      error: "Error enviando la orden al servidor.",
+    });
+  }
+});
+
 // Pastor 25-may-2026 · Live Copilot interactivo (HUD v2):
 // El input de chat del HUD manda mensajes acá; los reenviamos al server por la
 // misma WS autenticada del Bridge. La respuesta vuelve por el handler de ws.on("message")
@@ -1385,6 +1415,9 @@ function connect() {
           ok: !!msg.ok,
           reason: msg.reason || null,
         });
+      } else if (msg.type === "apply-macro-reply") {
+        // 4-ago-26 · Manos del HUD: resultado de la ejecución de una perilla.
+        forwardToOverlay("overlay:apply-macro-reply", msg);
       } else if (msg.type === "live-reply") {
         // Pastor 25-may-2026 · respuesta del Live Copilot interactivo.
         // Vino por la misma WS del Bridge tras un live-message enviado
@@ -1397,6 +1430,8 @@ function connect() {
           text: msg.text || "",
           reason: msg.reason || null,
           audioUsed: !!msg.audioUsed,
+          // 4-ago-26 · Manos del HUD: propuesta de acción estructurada.
+          proposal: msg.proposal || null,
           ts: msg.ts || Date.now(),
         });
       } else if (msg.type === "live-transcribe-reply") {
