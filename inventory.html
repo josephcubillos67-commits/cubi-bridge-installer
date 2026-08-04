@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>CUBI Bridge — Inventario de Plugins</title>
+<style>
+  :root { --gold: #D4AF37; --bg: #0A0A0A; --card: #140a0d; --border: #2a1015; --text: #e8e2d5; --muted: #9a9182; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: "Segoe UI", system-ui, sans-serif; font-size: 14px; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; color: var(--gold); margin: 0; flex: 1; }
+  main { padding: 14px 18px 28px; }
+  button { background: var(--gold); color: #0A0A0A; border: none; border-radius: 6px; padding: 7px 14px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { color: var(--gold); font-weight: 600; font-size: 12px; }
+  td.path { color: var(--muted); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  select { background: #0f0608; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--border); }
+  .pill.inst { color: #8fd18f; } .pill.proc { color: #8fb8d1; } .pill.unk { color: var(--muted); }
+  .folder-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }
+  .folder-row .x { color: #d17070; cursor: pointer; font-weight: bold; }
+  .report-col { margin-top: 6px; }
+  .report-col h3 { font-size: 13px; margin: 10px 0 4px; }
+  .ok { color: #8fd18f; } .miss { color: #d17070; } .other { color: #d1b870; } .rev { color: #b89ad1; }
+  ul { margin: 4px 0; padding-left: 20px; }
+  li { margin: 2px 0; font-size: 12.5px; }
+  #status { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧰 Inventario de Plugins — Biblioteca Profesional</h1>
+  <span id="status"></span>
+  <button id="btn-scan">🔎 Volver a escanear</button>
+</header>
+<main>
+  <div class="card">
+    <div class="muted">
+      El Bridge solo <b>encuentra y registra</b> sus plugins — nunca los mueve, copia ni carga.
+      Al servidor viaja únicamente el catálogo (nombres y ubicaciones), jamás archivos.
+    </div>
+    <div style="margin-top:8px">
+      <b style="color:var(--gold); font-size:13px">Carpetas revisadas</b>
+      <div id="standard-folders" class="muted" style="margin-top:4px"></div>
+      <div id="custom-folders" style="margin-top:6px"></div>
+      <button class="secondary" id="btn-add-folder" style="margin-top:8px">➕ Agregar carpeta manual…</button>
+    </div>
+  </div>
+
+  <div class="card" id="report-card" style="display:none">
+    <b style="color:var(--gold)">📖 Cruce con su Biblioteca Profesional registrada</b>
+    <div class="report-col" id="report-body"></div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px">
+      <b style="color:var(--gold)" id="plugin-count">Plugins encontrados</b>
+      <span style="flex:1"></span>
+      <button class="secondary" disabled title="Etapa siguiente: cargar el plugin de verdad">🧪 Probar compatibilidad (próximamente)</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>★</th><th>Nombre</th><th>Fabricante</th><th>Tipo</th><th>Formato</th><th>Versión</th><th>Categoría</th><th>Ruta</th></tr>
+      </thead>
+      <tbody id="plugin-rows"></tbody>
+    </table>
+    <div class="muted" id="empty-note" style="display:none; padding:10px 4px">
+      Todavía no hay escaneo. Pulse "Volver a escanear" arriba a la derecha.
+    </div>
+  </div>
+</main>
+<script>
+  const api = window.inventoryAPI;
+  let state = { inventory: null, customFolders: [], standardFolders: [], categories: [], report: null };
+
+  function esc(s) { const d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+
+  function renderFolders() {
+    document.getElementById("standard-folders").innerHTML =
+      state.standardFolders.map(function (f) { return esc(f); }).join("<br>");
+    const c = document.getElementById("custom-folders");
+    c.innerHTML = "";
+    state.customFolders.forEach(function (f) {
+      const row = document.createElement("div");
+      row.className = "folder-row";
+      row.innerHTML = '<span class="x" title="Quitar">✕</span><span>' + esc(f) + " <i class='muted'>(manual)</i></span>";
+      row.querySelector(".x").addEventListener("click", async function () {
+        const r = await api.removeFolder(f);
+        state.customFolders = r.customFolders; renderFolders();
+      });
+      c.appendChild(row);
+    });
+  }
+
+  function kindPill(k) {
+    if (k === "instrumento") return '<span class="pill inst">instrumento</span>';
+    if (k === "procesador") return '<span class="pill proc">procesador</span>';
+    return '<span class="pill unk">desconocido</span>';
+  }
+
+  function renderPlugins() {
+    const tbody = document.getElementById("plugin-rows");
+    tbody.innerHTML = "";
+    const plugins = (state.inventory && state.inventory.plugins) || [];
+    document.getElementById("plugin-count").textContent = "Plugins encontrados: " + plugins.length;
+    document.getElementById("empty-note").style.display = plugins.length ? "none" : "block";
+    plugins.forEach(function (p) {
+      const tr = document.createElement("tr");
+      const catOptions = ['<option value="">—</option>'].concat(
+        state.categories.map(function (c) {
+          return '<option value="' + c + '"' + (p.category === c ? " selected" : "") + ">" + c + "</option>";
+        })
+      ).join("");
+      tr.innerHTML =
+        '<td><input type="checkbox" ' + (p.important ? "checked" : "") + ' title="Marcar como Biblioteca Profesional"></td>' +
+        "<td>" + esc(p.name) + "</td>" +
+        "<td>" + esc(p.vendor || "—") + "</td>" +
+        "<td>" + kindPill(p.kind) + "</td>" +
+        "<td>" + esc(p.format) + "</td>" +
+        "<td>" + esc(p.version || "—") + "</td>" +
+        "<td><select>" + catOptions + "</select></td>" +
+        '<td class="path" title="' + esc(p.path) + '">' + esc(p.path) + "</td>";
+      const chk = tr.querySelector("input");
+      const sel = tr.querySelector("select");
+      function saveMark() {
+        p.important = chk.checked; p.category = sel.value || null;
+        api.setMark({ pluginPath: p.path, important: p.important, category: p.category });
+      }
+      chk.addEventListener("change", saveMark);
+      sel.addEventListener("change", saveMark);
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderReport() {
+    const card = document.getElementById("report-card");
+    const body = document.getElementById("report-body");
+    const r = state.report;
+    if (!r) { card.style.display = "none"; return; }
+    card.style.display = "block";
+    function list(items, cls, fmt) {
+      if (!items || !items.length) return "<ul><li class='muted'>— ninguno —</li></ul>";
+      return "<ul>" + items.map(function (i) { return '<li class="' + cls + '">' + fmt(i) + "</li>"; }).join("") + "</ul>";
+    }
+    body.innerHTML =
+      '<h3 class="ok">✓ Encontrados correctamente (' + (r.encontrados || []).length + ")</h3>" +
+      list(r.encontrados, "ok", function (i) { return esc(i.biblioteca) + ' <span class="muted">→ ' + esc(i.plugin) + "</span>"; }) +
+      '<h3 class="other">📁 En otra ubicación (' + (r.otraUbicacion || []).length + ")</h3>" +
+      list(r.otraUbicacion, "other", function (i) { return esc(i.biblioteca) + ' <span class="muted">→ ' + esc(i.path) + "</span>"; }) +
+      '<h3 class="rev">🔍 Requieren revisión (' + (r.revisar || []).length + ")</h3>" +
+      list(r.revisar, "rev", function (i) { return esc(i.biblioteca) + ' <span class="muted">¿es "' + esc(i.plugin) + '"?</span>'; }) +
+      '<h3 class="miss">✗ No encontrados (' + (r.noEncontrados || []).length + ")</h3>" +
+      list(r.noEncontrados, "miss", function (i) { return esc(i.biblioteca); });
+  }
+
+  async function refresh() {
+    state = await api.getState();
+    renderFolders(); renderPlugins(); renderReport();
+  }
+
+  document.getElementById("btn-scan").addEventListener("click", async function () {
+    const st = document.getElementById("status");
+    st.textContent = "Escaneando…";
+    try {
+      const r = await api.scan();
+      state.inventory = r.inventory;
+      st.textContent = r.sentToServer
+        ? "Escaneo listo · catálogo enviado, esperando cruce con la Biblioteca…"
+        : "Escaneo listo · sin conexión al servidor (el cruce se hará al reconectar)";
+      renderPlugins();
+    } catch (e) {
+      st.textContent = "Error al escanear: " + (e && e.message ? e.message : e);
+    }
+  });
+
+  document.getElementById("btn-add-folder").addEventListener("click", async function () {
+    const r = await api.addFolder();
+    if (r.added) { state.customFolders = r.customFolders; renderFolders(); }
+  });
+
+  api.onReport(function (report) {
+    state.report = report;
+    document.getElementById("status").textContent = "Informe de la Biblioteca recibido ✓";
+    renderReport();
+  });
+
+  refresh();
+</script>
+</body>
+</html>

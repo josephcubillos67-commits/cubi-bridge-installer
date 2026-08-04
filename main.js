@@ -35,6 +35,10 @@ const { execSync } = require("child_process");
 // CP5 — Canal WRITE separado (MIDI OUT a loopMIDI). Módulo
 // completamente aislado del observer READ-ONLY. OFF por defecto.
 const bridgeWrite = require("./bridge-write");
+const bridgeReaper = require("./bridge-reaper");
+// Etapa 0 del Motor VST — Inventario de Plugins (READ-ONLY del disco:
+// encuentra, reconoce y registra; nunca mueve, copia ni carga plugins).
+const pluginInventory = require("./plugin-inventory");
 
 // ════════════════════════════════════════════════════════════════
 // HARDENING v1.6.0 — Self-heal del launcher (Windows)
@@ -138,6 +142,18 @@ function createStoreSafe() {
 // const { autoUpdater } = require("electron-updater"); // <- desactivado v1.4.0
 
 const store = createStoreSafe();
+
+// Etapa 0 Motor VST — Inventario de Plugins: IPC + persistencia local.
+// sendWs entrega el catálogo por la WS autenticada cuando está viva.
+pluginInventory.init({
+  store,
+  sendWs: (obj) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
+    }
+    return false;
+  },
+});
 
 const SERVER_URL = process.env.BRIDGE_SERVER_URL || "https://apocalipsisconcafe.com";
 const WS_URL = SERVER_URL.replace(/^http/, "ws") + "/ws/bridge";
@@ -372,6 +388,10 @@ function rebuildMenu(state) {
     {
       label: hasToken ? "Re-emparejar estudio…" : "Emparejar estudio…",
       click: () => openPairingWindow(),
+    },
+    {
+      label: "🧰 Inventario de Plugins…",
+      click: () => { try { pluginInventory.openInventoryWindow(); } catch (e) { console.warn("[Bridge] inventario:", e.message); } },
     },
     {
       label: isPaused ? "▶ Reanudar observación" : "⏸ Pausar observación",
@@ -1298,6 +1318,9 @@ function connect() {
     // CP5 — wire del canal WRITE (MIDI OUT). OFF por defecto hasta
     // que el server mande midi_config{enabled:true} desde /lab.
     try { bridgeWrite.attach(ws); } catch (e) { console.warn("[Bridge] bridgeWrite.attach:", e && e.message); }
+    // Canal REAPER (prueba de perillas, OSC nativo). OFF por defecto hasta
+    // que el server mande reaper_config{enabled:true} desde /lab-reaper.
+    try { bridgeReaper.attach(ws); } catch (e) { console.warn("[Bridge] bridgeReaper.attach:", e && e.message); }
     // Hello inicial con capabilities (seam para Bridge 2/3)
     ws.send(JSON.stringify({
       type: "hello",
@@ -1306,6 +1329,9 @@ function connect() {
       bridgeVersion: BRIDGE_VERSION,
       capabilities: currentCapabilities(),
     }));
+    // Etapa 0 Motor VST — si hay inventario guardado, reenviar el catálogo
+    // al conectar (el server responde con el cruce contra la Biblioteca).
+    try { pluginInventory.sendCatalog(); } catch (e) { console.warn("[Bridge] inventory catalog:", e && e.message); }
     // Ping periódico (mantiene last_seen + pong para latency)
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
@@ -1385,9 +1411,16 @@ function connect() {
           reason: msg.reason || null,
           ts: msg.ts || Date.now(),
         });
+      } else if (msg.type === "plugin-inventory-report") {
+        // Etapa 0 Motor VST — informe del cruce catálogo ↔ Biblioteca
+        // Profesional registrada. Se reenvía a la ventana del inventario.
+        try { pluginInventory.handleServerMessage(msg); } catch (e) { console.warn("[Bridge] inventory report:", e && e.message); }
       } else if (msg.type === "midi_config" || msg.type === "midi_out") {
         // CP5 — delegado al módulo WRITE separado.
         try { bridgeWrite.handleServerMessage(msg); } catch (e) { console.warn("[Bridge WRITE] handle:", e && e.message); }
+      } else if (msg.type === "reaper_config" || msg.type === "reaper_cmd") {
+        // Prueba REAPER — delegado al módulo OSC separado.
+        try { bridgeReaper.handleServerMessage(msg); } catch (e) { console.warn("[Bridge REAPER] handle:", e && e.message); }
       } else if (msg.type === "audio-clip-request" && msg.clipReqId) {
         // 1.8.0 — el server pide los últimos N segundos del master para
         // mandárselos a Gemini Audio. Reenviamos a la ventana de captura
@@ -1427,6 +1460,8 @@ function connect() {
     closeCaptureWindow();
     // CP5 — cerrar puerto MIDI al perder WS
     try { bridgeWrite.detach(); } catch {}
+    // Prueba REAPER — cerrar socket OSC al perder WS
+    try { bridgeReaper.detach(); } catch {}
     updateTrayState(isPaused ? "paused" : "disconnected");
 
     // Anti ping-pong: si el servidor nos cerró por token inválido, fuimos
@@ -1563,6 +1598,15 @@ function disconnect() {
   captureRestartTimer = null;
   closeCaptureWindow();
   if (ws) {
+    // task #16 — avisar al server que ESTE cierre es intencional (el Pastor
+    // salió del tray, o hubo reparación/re-emparejamiento/pausa). Así el server
+    // NO le manda un WhatsApp de "Bridge desconectado de improviso". Best-effort:
+    // si el socket ya está muerto, el cierre limpio por code 1000 lo cubre igual.
+    try {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "shutdown", ts: Date.now() }));
+      }
+    } catch {}
     try { ws.removeAllListeners(); ws.close(); } catch {}
     ws = null;
   }

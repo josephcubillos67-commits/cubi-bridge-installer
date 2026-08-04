@@ -36,6 +36,21 @@ contextBridge.exposeInMainWorld("bridgeAPI", {
   },
 });
 
+// API exclusiva de la ventana Inventario de Plugins (Etapa 0 Motor VST).
+// READ-ONLY sobre el disco: escanea y registra, jamás carga/mueve plugins.
+contextBridge.exposeInMainWorld("inventoryAPI", {
+  getState: () => ipcRenderer.invoke("inventory:get-state"),
+  scan: () => ipcRenderer.invoke("inventory:scan"),
+  addFolder: () => ipcRenderer.invoke("inventory:add-folder"),
+  removeFolder: (folder) => ipcRenderer.invoke("inventory:remove-folder", folder),
+  setMark: (payload) => ipcRenderer.invoke("inventory:set-mark", payload),
+  onReport: (cb) => {
+    const handler = (_e, report) => cb(report);
+    ipcRenderer.on("inventory:report", handler);
+    return () => ipcRenderer.removeListener("inventory:report", handler);
+  },
+});
+
 // API exclusiva del Floating HUD overlay (ventana siempre-encima).
 // READ-ONLY: la ventana sólo recibe y muestra; no manda datos al DAW ni al servidor.
 contextBridge.exposeInMainWorld("overlayAPI", {
