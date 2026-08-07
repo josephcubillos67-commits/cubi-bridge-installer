@@ -1,6 +1,6 @@
 {
   "name": "cubi-bridge",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "CUBI Bridge — Observador READ-ONLY del estudio del Pastor Jose Cubillos. Conecta Cubase con el Coproductor IA en apocalipsisconcafe.com.",
   "main": "main.js",
   "author": {
@@ -48,7 +48,8 @@
       "package.json",
       "plugin-inventory.js",
       "inventory.html",
-      "bridge-reaper.js"
+      "bridge-reaper.js",
+      "reastream-receiver.js"
     ],
     "directories": {
       "buildResources": "build",

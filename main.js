@@ -39,6 +39,7 @@ const bridgeReaper = require("./bridge-reaper");
 // Etapa 0 del Motor VST — Inventario de Plugins (READ-ONLY del disco:
 // encuentra, reconoce y registra; nunca mueve, copia ni carga plugins).
 const pluginInventory = require("./plugin-inventory");
+const { createReaStreamReceiver } = require("./reastream-receiver");
 
 // ════════════════════════════════════════════════════════════════
 // HARDENING v1.6.0 — Self-heal del launcher (Windows)
@@ -341,6 +342,14 @@ function rebuildMenu(state) {
       type: "radio",
       checked: !currentAudioId,
       click: () => selectAudioInput(null, null),
+    },
+    {
+      // PoC Gateway (Pastor 8-ago-2026): oír el master de Cubase DIRECTO por
+      // el plugin ReaStream (UDP 58710) — sin VoiceMeeter, nivel real pre-Windows.
+      label: REASTREAM_LABEL + " — sin VoiceMeeter",
+      type: "radio",
+      checked: currentAudioId === REASTREAM_DEVICE_ID,
+      click: () => selectAudioInput(REASTREAM_DEVICE_ID, REASTREAM_LABEL),
     },
     { type: "separator" },
   ];
@@ -932,7 +941,7 @@ ipcMain.on("bridge:audio-inputs", (_e, list) => {
   // Bridge 1.10.1 — forward al HUD para el selector inline (sustituye al tray
   // cuando Windows no dibuja el icono).
   forwardToOverlay("overlay:audio-inputs", {
-    inputs: cachedAudioInputs,
+    inputs: inputsForPicker(),
     selected: {
       deviceId: store.get("audioInputDeviceId") || null,
       label: store.get("audioInputLabel") || null,
@@ -942,7 +951,7 @@ ipcMain.on("bridge:audio-inputs", (_e, list) => {
 
 // Bridge 1.10.1 — IPC handlers del selector dentro del HUD.
 ipcMain.handle("overlay:get-audio-state", () => ({
-  inputs: cachedAudioInputs,
+  inputs: inputsForPicker(),
   selected: {
     deviceId: store.get("audioInputDeviceId") || null,
     label: store.get("audioInputLabel") || null,
@@ -954,13 +963,55 @@ ipcMain.on("overlay:select-audio-input", (_e, payload) => {
   selectAudioInput(deviceId, label);
   // Re-emitir estado al HUD para que el dropdown refleje el cambio.
   forwardToOverlay("overlay:audio-inputs", {
-    inputs: cachedAudioInputs,
+    inputs: inputsForPicker(),
     selected: {
       deviceId: store.get("audioInputDeviceId") || null,
       label: store.get("audioInputLabel") || null,
     },
   });
 });
+
+// ─── PoC ReaStream (Gateway sin VoiceMeeter) ────────────────────
+// Pseudo-fuente "reastream": en vez de getUserMedia, el main abre un socket
+// UDP (receptor aislado en reastream-receiver.js) y le pasa el PCM a la
+// ventana de captura por IPC. Todo lo demás (medidor, ring, clip, WS) intacto.
+const REASTREAM_DEVICE_ID = "reastream";
+const REASTREAM_LABEL = "🎛 ReaStream (master de Cubase)";
+let reaStreamReceiver = null;
+
+function syncReaStreamReceiver() {
+  const wanted = store.get("audioInputDeviceId") === REASTREAM_DEVICE_ID && !!captureWindow;
+  if (wanted && !reaStreamReceiver) {
+    reaStreamReceiver = createReaStreamReceiver({
+      onPcm: (mono, sampleRate) => {
+        if (!captureWindow) return;
+        try {
+          captureWindow.webContents.send("bridge:reastream-pcm", {
+            pcm: Buffer.from(mono.buffer, mono.byteOffset, mono.byteLength),
+            sampleRate,
+          });
+        } catch {}
+      },
+      onStatus: (status) => {
+        // El HUD ya muestra "Fuente activa"; acá solo dejamos rastro en consola.
+        console.log("[Bridge] ReaStream status: " + status);
+      },
+      log: console.log,
+    });
+    reaStreamReceiver.start();
+  } else if (!wanted && reaStreamReceiver) {
+    try { reaStreamReceiver.stop(); } catch {}
+    reaStreamReceiver = null;
+  }
+}
+
+// La pseudo-fuente debe aparecer también en el selector del HUD (no solo tray).
+function inputsForPicker() {
+  return [
+    { deviceId: REASTREAM_DEVICE_ID, label: REASTREAM_LABEL + " — sin VoiceMeeter", groupId: "", kind: "audioinput" },
+    ...cachedAudioInputs,
+  ];
+}
 
 function selectAudioInput(deviceId, label) {
   if (deviceId) {
@@ -1025,7 +1076,9 @@ function openCaptureWindow() {
   });
 
   captureWindow.loadFile("capture.html");
-  captureWindow.on("closed", () => { captureWindow = null; });
+  captureWindow.on("closed", () => { captureWindow = null; syncReaStreamReceiver(); });
+  // PoC ReaStream: si la fuente elegida es "reastream", encender el receptor UDP.
+  syncReaStreamReceiver();
 
   // Debug: descomentar para ver logs de la captura
   // captureWindow.webContents.openDevTools({ mode: "detach" });
@@ -1036,6 +1089,7 @@ function closeCaptureWindow() {
     try { captureWindow.close(); } catch {}
     captureWindow = null;
   }
+  syncReaStreamReceiver();
 }
 
 // ─── Floating HUD overlay (ventana siempre-encima) ──────────────

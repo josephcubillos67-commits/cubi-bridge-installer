@@ -179,11 +179,88 @@
       }
     }
 
+    // ── PoC ReaStream (Gateway sin VoiceMeeter, Pastor 8-ago-2026) ──────
+    // Fuente alternativa: PCM del master de Cubase vía plugin ReaStream →
+    // UDP 58710 (main process) → IPC → este FIFO → nodo fuente WebAudio.
+    // Devuelve un AudioNode que alimenta la MISMA cadena (K-weight, analysers,
+    // ring PCM, clip WAV) — el resto del pipeline ni se entera del origen.
+    function createReaStreamSource(audioCtx) {
+      const ctxRate = audioCtx.sampleRate;
+      const fifo = new Float32Array(ctxRate * 4); // 4s de colchón
+      let rd = 0, wr = 0, avail = 0;
+      const MAX_BUFFER = Math.floor(ctxRate * 1.0);   // tope de latencia ~1s
+      const KEEP_AFTER_DROP = Math.floor(ctxRate * 0.25);
+      window.bridgeAPI.onReaStreamPcm((p) => {
+        // p.pcm llega como Uint8Array (Buffer serializado) — reinterpretar float32.
+        // Defensa de alineación (review): si el byteOffset no es múltiplo de 4,
+        // Float32Array sobre el mismo buffer tiraría RangeError — copiar alineado.
+        let raw = p.pcm;
+        if (raw.byteOffset % 4 !== 0) raw = new Uint8Array(raw); // copia alineada
+        const src = new Float32Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 4));
+        if (src.length === 0 || !p.sampleRate) return;
+        // Resampleo lineal simple srcRate → ctxRate (suficiente para medidor/oído).
+        const ratio = p.sampleRate / ctxRate;
+        const outLen = Math.max(1, Math.floor(src.length / ratio));
+        for (let i = 0; i < outLen; i++) {
+          const pos = i * ratio;
+          const i0 = Math.min(src.length - 1, Math.floor(pos));
+          const i1 = Math.min(src.length - 1, i0 + 1);
+          const v = src[i0] + (src[i1] - src[i0]) * (pos - i0);
+          if (avail < fifo.length) { fifo[wr] = v; wr = (wr + 1) % fifo.length; avail++; }
+        }
+        // Guardia de deriva de reloj: si el colchón crece >1s, soltamos lo viejo.
+        if (avail > MAX_BUFFER) {
+          const drop = avail - KEEP_AFTER_DROP;
+          rd = (rd + drop) % fifo.length;
+          avail -= drop;
+        }
+      });
+      // ScriptProcessor como FUENTE: entrada muda (ConstantSource 0) para que
+      // dispare, salida = FIFO (o silencio si el DAW no manda).
+      const feeder = audioCtx.createScriptProcessor(4096, 1, 1);
+      feeder.onaudioprocess = (ev) => {
+        const out = ev.outputBuffer.getChannelData(0);
+        for (let i = 0; i < out.length; i++) {
+          if (avail > 0) { out[i] = fifo[rd]; rd = (rd + 1) % fifo.length; avail--; }
+          else out[i] = 0;
+        }
+      };
+      const silent = audioCtx.createConstantSource();
+      silent.offset.value = 0;
+      silent.connect(feeder);
+      silent.start();
+      // Garantizar procesamiento: el grafo debe llegar a destination (mudo).
+      const sink = audioCtx.createGain();
+      sink.gain.value = 0;
+      feeder.connect(sink);
+      sink.connect(audioCtx.destination);
+      return feeder;
+    }
+
     async function start() {
       try {
+        let cfg0 = null;
+        try { cfg0 = await window.bridgeAPI.getAudioConfig(); } catch {}
+        const useReaStream = !!(cfg0 && cfg0.deviceId === "reastream");
+
+        let audioTracks = null;
+        let audioCtx, source;
+        if (useReaStream) {
+          // PoC Gateway: sin getUserMedia, sin loopback, sin VoiceMeeter.
+          audioCtx = new AudioContext();
+          source = createReaStreamSource(audioCtx);
+          captureMode = "chosen";
+          log("Captura desde ReaStream (UDP 58710) — master del DAW, nivel real.");
+          try {
+            window.bridgeAPI.reportCaptureSource({
+              label: "ReaStream (master de Cubase)",
+              mode: "chosen",
+            });
+          } catch {}
+        } else {
         const stream = await getStream();
 
-        const audioTracks = stream.getAudioTracks();
+        audioTracks = stream.getAudioTracks();
         if (audioTracks.length === 0) {
           window.bridgeAPI.reportCaptureError("No se obtuvo audio. Abre el tray del Bridge y elige una fuente desde '🎤 Fuente de audio'.");
           return;
@@ -205,9 +282,10 @@
         // Poblar tray menu con la lista real de devices (ahora que hay permiso)
         publishAudioInputs();
 
-        const audioCtx = new AudioContext();
+        audioCtx = new AudioContext();
+        source = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
+        }
         const sampleRate = audioCtx.sampleRate;
-        const source = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
 
         // ────────────────────────────────────────────────────────────────
         // FIX #3 — Cadena K-weighted BS.1770-4 exacta
@@ -746,6 +824,7 @@
         const audioChunks = []; // [{blob, ts}]
         let recorder = null;
         try {
+          if (!audioTracks) throw new Error("fuente ReaStream: sin MediaStream (el clip sale del ring PCM)");
           const recordStream = new MediaStream(audioTracks);
           recorder = new MediaRecorder(recordStream, {
             mimeType: "audio/webm;codecs=opus",
@@ -882,7 +961,7 @@
         // Si el sistema termina la captura (usuario la corta desde el panel
         // de Windows, Cubase cambia de device, etc.) avisamos para que main.js
         // reintente automáticamente.
-        audioTracks[0].addEventListener("ended", () => {
+        if (audioTracks) audioTracks[0].addEventListener("ended", () => {
           clearInterval(interval);
           try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch {}
           log("Stream del sistema terminado — main.js reintentará.");

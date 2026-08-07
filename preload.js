@@ -28,6 +28,14 @@ contextBridge.exposeInMainWorld("bridgeAPI", {
   // El server pide los últimos N segundos del master cuando el Pastor hace
   // una pregunta musical en el HUD. La ventana de captura devuelve un
   // WebM/Opus base64 (~120KB para 10s). Solo viaja bajo demanda — NO continuo.
+  // PoC ReaStream (Gateway sin VoiceMeeter): PCM mono float32 del master de
+  // Cubase, parseado en main (UDP 58710) y entregado en lotes ~100ms.
+  onReaStreamPcm: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("bridge:reastream-pcm", handler);
+    return () => ipcRenderer.removeListener("bridge:reastream-pcm", handler);
+  },
+
   sendAudioClip: (payload) => ipcRenderer.send("bridge:audio-clip-reply", payload),
   onAudioClipRequest: (cb) => {
     const handler = (_e, req) => cb(req);
