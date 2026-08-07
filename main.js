@@ -1013,7 +1013,145 @@ function inputsForPicker() {
   ];
 }
 
+// ─── Detección + guía de instalación de ReaStream (Pastor 8-ago-2026) ──────
+// Cockos NO permite redistribuir ReaPlugs sin acuerdo firmado, así que el
+// Bridge detecta el plugin y, si falta, lleva a la descarga OFICIAL de Cockos
+// (nunca copias de terceros). Tras instalar, lo detecta solo y guía al master.
+const REAPLUGS_OFFICIAL_URL = "https://www.cockos.com/reaper/reaplugs/";
+const REASTREAM_DLL_RE = /^reastream.*\.(dll|vst3)$/i;
+
+function reaStreamCandidateDirs() {
+  const pf = process.env["ProgramFiles"] || "C:\\Program Files";
+  const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  return [
+    path.join(pf, "VSTPlugins"),
+    path.join(pf86, "VSTPlugins"),
+    path.join(pf, "Steinberg", "VstPlugins"),
+    path.join(pf, "Steinberg", "VSTPlugins"),
+    path.join(pf86, "Steinberg", "VstPlugins"),
+    path.join(pf86, "Steinberg", "VSTPlugins"),
+    path.join(pf, "Common Files", "VST2"),
+    path.join(pf, "Common Files", "Steinberg", "VST2"),
+    path.join(pf, "Common Files", "VST3"),
+  ];
+}
+
+// Busca reastream*.dll con profundidad acotada (los VST folders pueden ser
+// enormes; ReaPlugs instala en <root>\ReaPlugs\, así que 3 niveles sobran).
+function scanForReaStream(dirs, depth = 3) {
+  for (const dir of dirs) {
+    const hit = scanDirForReaStream(dir, depth);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function scanDirForReaStream(dir, depth) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+  for (const e of entries) {
+    if (e.isFile() && REASTREAM_DLL_RE.test(e.name)) return path.join(dir, e.name);
+  }
+  if (depth <= 1) return null;
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const hit = scanDirForReaStream(path.join(dir, e.name), depth - 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function detectReaStreamPlugin() {
+  if (process.platform !== "win32") return null;
+  return scanForReaStream(reaStreamCandidateDirs());
+}
+
+const CUBASE_MASTER_GUIDE =
+  "En Cubase: abra el canal Stereo Out (master) → Inserts → agregue \"ReaStream\" → " +
+  "dentro del plugin elija \"Send audio/MIDI\" y destino \"* local broadcast\". " +
+  "Reproduzca algo y el Bridge lo oirá al nivel real.";
+
+let reaStreamInstallPoll = null;
+
+function stopReaStreamInstallPoll() {
+  if (reaStreamInstallPoll) { clearInterval(reaStreamInstallPoll); reaStreamInstallPoll = null; }
+}
+
+function notifyReaStream(title, body) {
+  try { new Notification({ title, body }).show(); } catch (e) { console.warn("[Bridge] Notification falló:", e.message); }
+}
+
+// Vigila hasta 10 min tras abrir la descarga oficial; al detectar el .dll
+// instalado, avisa solo y da el paso siguiente (master de Cubase).
+function startReaStreamInstallPoll() {
+  stopReaStreamInstallPoll();
+  const startedAt = Date.now();
+  reaStreamInstallPoll = setInterval(() => {
+    const hit = detectReaStreamPlugin();
+    if (hit) {
+      stopReaStreamInstallPoll();
+      console.log("[Bridge] ReaStream detectado: " + hit);
+      notifyReaStream("ReaStream detectado ✓", "Instalación correcta. " + CUBASE_MASTER_GUIDE);
+      return;
+    }
+    if (Date.now() - startedAt > 10 * 60 * 1000) {
+      stopReaStreamInstallPoll();
+      notifyReaStream(
+        "ReaStream aún no aparece",
+        "Si ya lo instaló, reinicie el Bridge. Si no, la fuente ReaStream quedará esperando al plugin."
+      );
+    }
+  }, 5000);
+}
+
+// Al ELEGIR la fuente ReaStream: detectar → guiar (o llevar a descarga oficial).
+async function guideReaStreamSetup() {
+  if (process.platform !== "win32") return;
+  const hit = detectReaStreamPlugin();
+  if (hit) {
+    console.log("[Bridge] ReaStream ya instalado: " + hit);
+    notifyReaStream("ReaStream listo ✓", CUBASE_MASTER_GUIDE);
+    return;
+  }
+  try {
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      title: "Falta el plugin ReaStream",
+      message: "Para oír el master de Cubase al nivel real, falta instalar ReaStream (gratuito, de Cockos).",
+      detail:
+        "Por licencia no podemos incluirlo en el instalador, pero la descarga oficial es segura y de un paso:\n\n" +
+        "1) Descargue \"ReaPlugs VST 64-bit\" del sitio oficial de Cockos.\n" +
+        "2) Instálelo con las opciones por defecto (siguiente → siguiente).\n\n" +
+        "El Bridge lo detectará solo apenas termine y le dirá el paso siguiente.",
+      buttons: ["Descargar del sitio oficial (Cockos)", "Ya lo tengo instalado", "Ahora no"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (response === 0) {
+      try { shell.openExternal(REAPLUGS_OFFICIAL_URL); } catch {}
+      startReaStreamInstallPoll();
+    } else if (response === 1) {
+      // Dice que ya está pero no lo vimos en las carpetas VST estándar:
+      // seguimos vigilando por si vive en una ruta no estándar recién agregada.
+      notifyReaStream(
+        "No encontramos ReaStream todavía",
+        "Buscamos en las carpetas VST estándar. Si lo instaló en otra ruta, Cubase igual lo cargará — siga con el master. " + CUBASE_MASTER_GUIDE
+      );
+      startReaStreamInstallPoll();
+    }
+  } catch (e) {
+    console.warn("[Bridge] guía ReaStream falló:", e.message);
+  }
+}
+
 function selectAudioInput(deviceId, label) {
+  if (deviceId === REASTREAM_DEVICE_ID) {
+    // Guía sin bloquear el switch de fuente (el receptor UDP arranca igual).
+    setTimeout(() => { guideReaStreamSetup(); }, 200);
+  } else {
+    stopReaStreamInstallPoll();
+  }
   if (deviceId) {
     store.set("audioInputDeviceId", deviceId);
     store.set("audioInputLabel", label || deviceId);
