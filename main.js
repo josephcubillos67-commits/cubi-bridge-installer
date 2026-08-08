@@ -51,6 +51,12 @@ const fxChainLibrary = createFxChainLibrary({
   dir: vstHandsPoc.fxChainsDir(),
   onChange: (chains) => sendFxChains(chains),
   log: (...a) => console.log("[FxChains]", ...a),
+  // Ficha de cada cadena: estado "disponible"/"falta plugin" cruzando contra
+  // el Inventario de Plugins ya existente (solo nombres, jamás archivos).
+  getInstalledPlugins: () => {
+    const inv = store.get("pluginInventory");
+    return inv && Array.isArray(inv.plugins) ? inv.plugins.map((p) => p.name).filter(Boolean) : null;
+  },
 });
 function sendFxChains(chains) {
   if (ws && ws.readyState === WebSocket.OPEN) {

@@ -24,7 +24,49 @@ const path = require("path");
 const MAX_CHAINS = 200; // tope defensivo
 const DEBOUNCE_MS = 1500; // REAPER escribe en varias pasadas; esperar a que asiente
 
-function createFxChainLibrary({ dir, onChange, log }) {
+// ── Ficha de cada cadena (Pastor 8-ago-26: "el Bridge administra") ──
+// El .RfxChain es texto: los plugins aparecen como <VST "VST3: Ozone 12
+// (iZotope, Inc.)" ... , <CLAP "..." o <JS nombre. Leemos SOLO los nombres
+// (el contenido/preset jamás sale de la PC).
+function parseChainPlugins(file) {
+  const plugins = [];
+  try {
+    const text = fs.readFileSync(file, "utf8").slice(0, 512 * 1024);
+    const re = /^\s*<(VST|CLAP|AU|LV2|DX)\s+"([^"]+)"/gm;
+    let m;
+    while ((m = re.exec(text)) && plugins.length < 32) {
+      let name = m[2]
+        .replace(/^(VST3?i?|VSTi|CLAP|AUi?|LV2|DXi?):\s*/i, "") // prefijo de formato
+        .replace(/\s*\([^)]*\)\s*$/, "") // vendor "(iZotope, Inc.)"
+        .trim();
+      if (name && !plugins.includes(name)) plugins.push(name);
+    }
+    // JSFX: <JS nombre/ruta [...]
+    const reJs = /^\s*<JS\s+(\S+)/gm;
+    while ((m = reJs.exec(text)) && plugins.length < 32) {
+      const name = "JS: " + m[1].replace(/^"|"$/g, "");
+      if (!plugins.includes(name)) plugins.push(name);
+    }
+  } catch {}
+  return plugins;
+}
+
+// Tipo por el nombre que el usuario le puso (heurística honesta: si no
+// se reconoce, "General" — jamás inventamos una categoría).
+function inferChainType(name) {
+  const n = String(name).toLowerCase();
+  if (/\b(voz|vocal|voice|vox|coro|predicaci|podcast)/.test(n)) return "Voz";
+  if (/\b(master|stream|mezcla final|bus)/.test(n)) return "Master";
+  if (/\b(bater|drum|kick|bombo|snare|redoblante|percusi)/.test(n)) return "Batería";
+  if (/\b(bajo|bass)/.test(n)) return "Bajo";
+  if (/\b(guit|gtr)/.test(n)) return "Guitarra";
+  if (/\b(piano|tecla|keys|pad|sinte|synth)/.test(n)) return "Teclas";
+  return "General";
+}
+
+const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+function createFxChainLibrary({ dir, onChange, log, getInstalledPlugins }) {
   const logFn = log || ((...a) => console.log("[FxChains]", ...a));
   let watcher = null;
   let debounceTimer = null;
@@ -46,10 +88,13 @@ function createFxChainLibrary({ dir, onChange, log }) {
           if (!/\.rfxchain$/i.test(e.name)) continue;
           try {
             const st = fs.statSync(full);
+            const name = path.basename(e.name, path.extname(e.name));
             found.push({
-              name: path.basename(e.name, path.extname(e.name)),
+              name,
               file: full,
               mtime: st.mtimeMs,
+              tipo: inferChainType(name),
+              plugins: parseChainPlugins(full),
             });
           } catch {}
         }
@@ -75,9 +120,36 @@ function createFxChainLibrary({ dir, onChange, log }) {
     return changed;
   }
 
-  /** Lista pública (sin rutas privadas): [{ name, mtime }] */
+  /**
+   * Lista pública (sin rutas privadas ni contenido):
+   * [{ name, tipo, plugins, estado, mtime }]
+   * estado: cruce contra el Inventario de Plugins del Bridge —
+   *   "disponible" | "falta plugin" | "sin verificar" (sin inventario; honesto).
+   */
   function list() {
-    return chains.map((c) => ({ name: c.name, mtime: Math.round(c.mtime) }));
+    let installed = null;
+    try {
+      const inv = getInstalledPlugins ? getInstalledPlugins() : null;
+      if (Array.isArray(inv) && inv.length > 0) installed = inv.map(norm);
+    } catch {}
+    return chains.map((c) => {
+      let estado = "sin verificar";
+      if (installed) {
+        const faltantes = (c.plugins || []).filter((p) => {
+          if (p.startsWith("JS: ")) return false; // JSFX vive dentro de REAPER
+          const np = norm(p);
+          return !installed.some((i) => i.includes(np) || np.includes(i));
+        });
+        estado = faltantes.length === 0 ? "disponible" : "falta plugin";
+      }
+      return {
+        name: c.name,
+        tipo: c.tipo || "General",
+        plugins: c.plugins || [],
+        estado,
+        mtime: Math.round(c.mtime),
+      };
+    });
   }
 
   /** Resuelve un nombre confirmado → ruta del .RfxChain (o null, honesto). */
