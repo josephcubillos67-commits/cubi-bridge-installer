@@ -40,6 +40,7 @@ const bridgeReaper = require("./bridge-reaper");
 // encuentra, reconoce y registra; nunca mueve, copia ni carga plugins).
 const pluginInventory = require("./plugin-inventory");
 const { createReaStreamReceiver } = require("./reastream-receiver");
+const vstHandsPoc = require("./vst-hands-poc");
 
 // ════════════════════════════════════════════════════════════════
 // HARDENING v1.6.0 — Self-heal del launcher (Windows)
@@ -401,6 +402,12 @@ function rebuildMenu(state) {
     {
       label: "🧰 Inventario de Plugins…",
       click: () => { try { pluginInventory.openInventoryWindow(); } catch (e) { console.warn("[Bridge] inventario:", e.message); } },
+    },
+    {
+      // PoC "Las Manos" (Pastor 8-ago-2026): WAV → plugin real (vía REAPER
+      // batchconvert, Plan B de la visión Motor VST) → WAV procesado.
+      label: "✋ PoC Manos: procesar WAV con mis plugins…",
+      click: () => { vstHandsPoc.runHandsPoc({ dialog, shell, Notification }); },
     },
     {
       label: isPaused ? "▶ Reanudar observación" : "⏸ Pausar observación",
