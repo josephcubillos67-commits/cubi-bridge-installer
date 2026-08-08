@@ -41,6 +41,22 @@ const bridgeReaper = require("./bridge-reaper");
 const pluginInventory = require("./plugin-inventory");
 const { createReaStreamReceiver } = require("./reastream-receiver");
 const vstHandsPoc = require("./vst-hands-poc");
+// Biblioteca de Cadenas + render remoto (Mesa → Bridge → REAPER → Mesa)
+const { createFxChainLibrary } = require("./fx-chain-library");
+const bridgeRender = require("./bridge-render");
+
+// Biblioteca viva de FX Chains: escanea/vigila la carpeta de REAPER y
+// publica NOMBRES por la WS (jamás contenido — presets privados del Pastor).
+const fxChainLibrary = createFxChainLibrary({
+  dir: vstHandsPoc.fxChainsDir(),
+  onChange: (chains) => sendFxChains(chains),
+  log: (...a) => console.log("[FxChains]", ...a),
+});
+function sendFxChains(chains) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify({ type: "fx-chains", chains: chains || fxChainLibrary.list() })); } catch {}
+  }
+}
 
 // ════════════════════════════════════════════════════════════════
 // HARDENING v1.6.0 — Self-heal del launcher (Windows)
@@ -1561,6 +1577,10 @@ function connect() {
     // Etapa 0 Motor VST — si hay inventario guardado, reenviar el catálogo
     // al conectar (el server responde con el cruce contra la Biblioteca).
     try { pluginInventory.sendCatalog(); } catch (e) { console.warn("[Bridge] inventory catalog:", e && e.message); }
+    // Biblioteca de Cadenas: arrancar la vigilancia (idempotente) y
+    // publicar la lista al conectar — el Coproductor solo cita cadenas
+    // confirmadas por esta lista.
+    try { fxChainLibrary.stop(); fxChainLibrary.start(); sendFxChains(); } catch (e) { console.warn("[Bridge] fx-chains:", e && e.message); }
     // Ping periódico (mantiene last_seen + pong para latency)
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
@@ -1614,6 +1634,16 @@ function connect() {
           ok: !!msg.ok,
           reason: msg.reason || null,
         });
+      } else if (msg.type === "render-request") {
+        // Mesa → Bridge: procesar una pista con una FX Chain real vía REAPER.
+        // Módulo aislado; responde por HTTP (resultado) o WS (fallo honesto).
+        bridgeRender.handleRenderRequest(msg, {
+          serverUrl: SERVER_URL,
+          getToken: () => store.get("token") || null,
+          resolveChain: (name) => fxChainLibrary.resolve(name),
+          sendWs: (obj) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); },
+          log: (...a) => console.log("[Render]", ...a),
+        }).catch((e) => console.warn("[Render] error no capturado:", e && e.message));
       } else if (msg.type === "apply-macro-reply") {
         // 4-ago-26 · Manos del HUD: resultado de la ejecución de una perilla.
         forwardToOverlay("overlay:apply-macro-reply", msg);

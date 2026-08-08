@@ -69,6 +69,53 @@ function buildBatchList(inputWav, chainPath, outDir, outBaseName) {
 }
 
 /**
+ * ── Motor de render reutilizable (headless, sin diálogos) ────────
+ * El MISMO camino validado por el PoC, expuesto para el flujo
+ * Mesa→Bridge→REAPER→Mesa. Devuelve veredicto honesto:
+ *   { ok, outputPath?, secs, error?, logTail? }
+ */
+async function renderWavWithChain({ inputPath, chainPath, timeoutMs }) {
+  const reaper = findReaperExe();
+  if (!reaper) return { ok: false, error: "REAPER no está instalado en las rutas estándar", secs: 0 };
+  if (!fs.existsSync(inputPath)) return { ok: false, error: "No existe el WAV de entrada", secs: 0 };
+  if (!fs.existsSync(chainPath)) return { ok: false, error: "No existe la cadena .RfxChain", secs: 0 };
+
+  const outDir = path.dirname(inputPath);
+  const baseName = path.basename(inputPath, path.extname(inputPath));
+  const outBaseName = baseName + "-CUBI";
+  const expectedOut = path.join(outDir, outBaseName + ".wav");
+  try { if (fs.existsSync(expectedOut)) fs.rmSync(expectedOut); } catch {}
+
+  const listPath = path.join(os.tmpdir(), "cubi-render-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6) + ".txt");
+  fs.writeFileSync(listPath, buildBatchList(inputPath, chainPath, outDir, outBaseName), "utf8");
+
+  const t0 = Date.now();
+  await new Promise((resolve, reject) => {
+    execFile(reaper, ["-newinst", "-nosplash", "-batchconvert", listPath], { timeout: timeoutMs || 5 * 60 * 1000 }, (err) => {
+      if (err && err.killed) return reject(new Error("timeout — plugin o REAPER no respondió"));
+      resolve(); // la verdad es el archivo de salida, no el exit code
+    });
+  }).catch((e) => { throw e; });
+  const secs = Number(((Date.now() - t0) / 1000).toFixed(1));
+
+  let logTail = "";
+  try {
+    const logPath = listPath + ".log";
+    if (fs.existsSync(logPath)) logTail = fs.readFileSync(logPath, "utf8").slice(-800);
+  } catch {}
+  try { fs.rmSync(listPath); } catch {}
+
+  const ok = fs.existsSync(expectedOut) && fs.statSync(expectedOut).size > 1000;
+  if (!ok) {
+    return {
+      ok: false, secs, logTail,
+      error: "REAPER corrió pero no salió el WAV procesado (¿la cadena referencia un plugin no escaneado?)",
+    };
+  }
+  return { ok: true, outputPath: expectedOut, secs, logTail };
+}
+
+/**
  * Corre el ensayo completo con diálogos nativos (sin UI nueva):
  *  1) elegir WAV  2) elegir .RfxChain  3) REAPER procesa  4) mostrar resultado.
  * `deps` = { dialog, shell, Notification } inyectados desde main.js.
